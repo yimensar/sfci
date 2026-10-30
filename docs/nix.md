@@ -60,6 +60,11 @@ SGD 6.45.1's published npm shrinkwrap installs development tooling inside its ow
 package. The Nix build explicitly prunes that nested tree before the normal
 production-only prune. Its runtime module and required dependencies remain;
 the test suite runs before the installation is produced.
+The packaged npm native-build helper scripts keep their upstream
+`/usr/bin/env python3` shebangs. This prevents unused Python and compiler tools
+from being retained in the runtime image by Nix's automatic shebang rewriting.
+Installing or compiling extra native plugins inside the runtime image is outside
+the supplied toolchain; dependencies are built before publication.
 
 The default command is `sfci --help`. `/workspace` is the working directory.
 For an interactive checkout, mount it and preserve the runner's user identity:

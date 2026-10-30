@@ -51,6 +51,20 @@ in buildNpmPackage {
       --prefix PATH : ${lib.makeBinPath [ gitMinimal ]}
   '';
 
+  postFixup = ''
+    # npm includes node-gyp for optional future native-module builds. Those
+    # helpers are not used by sfci, and binding their shebangs to build Python
+    # would accidentally retain Python and its compiler in the runtime closure.
+    # Keep their upstream env-based interpreter choice instead.
+    node_gyp="$out/lib/node_modules/${manifest.name}/node_modules/npm/node_modules/node-gyp"
+    if [ -d "$node_gyp" ]; then
+      while IFS= read -r -d $'\0' helper; do
+        substituteInPlace "$helper" \
+          --replace-quiet '${nodejs_22.python}/bin/python3' '/usr/bin/env python3'
+      done < <(find "$node_gyp" -type f -name '*.py' -print0)
+    fi
+  '';
+
   meta = {
     description = manifest.description;
     homepage = "https://github.com/yimensar/sfci";

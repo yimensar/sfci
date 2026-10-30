@@ -96,6 +96,7 @@ jobs:
           skopeo=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#skopeo)
           auth_file=$(mktemp)
           trap 'rm -f "$auth_file"' EXIT
+          printf '{}\n' > "$auth_file"
           printf '%s' "$GHCR_TOKEN" | "$skopeo/bin/skopeo" login --authfile "$auth_file" --username "$GHCR_USER" --password-stdin ghcr.io
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
