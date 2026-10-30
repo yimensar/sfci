@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  node:
+    name: CLI and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check
+      - name: Smoke-test the packed installation
+        run: |
+          archive=$(npm pack --ignore-scripts --silent)
+          archive_path="$PWD/$archive"
+          install_dir=$(mktemp -d)
+          (
+            cd "$install_dir"
+            npm install "$archive_path" --omit=dev --no-audit --no-fund
+          )
+          "$install_dir/node_modules/.bin/sfci" --version
+          "$install_dir/node_modules/.bin/sfci" --help
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-package
+          path: "*.tgz"
+          if-no-files-found: error
+          retention-days: 14
+
+  nix:
+    name: Reproducible package
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@d9186cbdca7adedf113a159fa91f725a27866771 # v31
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+      - run: nix flake check --print-build-logs
+      - run: nix run . -- --version
+      - run: nix develop --command node --version
+
+  image:
+    name: Publish CI image
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [node, nix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@d9186cbdca7adedf113a159fa91f725a27866771 # v31
+      - name: Build the runtime image
+        run: nix build .#image --print-build-logs
+      - name: Smoke-test the image
+        run: |
+          image_id=$(docker load --input result | sed -n 's/^Loaded image: //p')
+          test -n "$image_id"
+          docker run --rm "$image_id" sfci --version
+          docker run --rm "$image_id" sf --version
+          docker run --rm "$image_id" git --version
+          docker run --rm --volume "$(command -v node):/tmp/runner-node:ro" "$image_id" /tmp/runner-node --version
+          docker image inspect "$image_id" --format 'Uncompressed image size: {{.Size}} bytes'
+          du -h result
+      - name: Publish to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          skopeo=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#skopeo)
+          auth_file=$(mktemp)
+          trap 'rm -f "$auth_file"' EXIT
+          printf '%s' "$GHCR_TOKEN" | "$skopeo/bin/skopeo" login --authfile "$auth_file" --username "$GHCR_USER" --password-stdin ghcr.io
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            package_version=$(nix eval .#packages.x86_64-linux.sfci.version --raw)
+            test "$tag" = "$package_version"
+          else
+            tag=edge
+          fi
+          "$skopeo/bin/skopeo" copy --authfile "$auth_file" "docker-archive:$PWD/result" "docker://$image:$tag"
+          "$skopeo/bin/skopeo" copy --authfile "$auth_file" "docker-archive:$PWD/result" "docker://$image:sha-$GITHUB_SHA"
+          printf 'Published %s:%s\n' "$image" "$tag" >> "$GITHUB_STEP_SUMMARY"
+          printf '\nFor a first publication, set the GHCR package visibility to **Public**. Repository visibility alone does not make a new package public.\n' >> "$GITHUB_STEP_SUMMARY"

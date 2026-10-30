@@ -1,0 +1,11 @@
+node_modules/
+dist/
+result
+result-*
+.sfci/
+.sf/
+.sfdx/
+*.tgz
+.DS_Store
+.env
+.env.*
