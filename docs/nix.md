@@ -107,6 +107,7 @@ After changing npm dependencies:
 
 ```sh
 npm install
+node scripts/normalize-lock.mjs
 nix run --inputs-from . nixpkgs#prefetch-npm-deps -- package-lock.json
 ```
 

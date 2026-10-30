@@ -17,7 +17,7 @@ in buildNpmPackage {
   };
 
   # Updated only when package-lock.json changes. See docs/nix.md.
-  npmDepsHash = "sha256-MddkSse6mkdlLjSqcsg52g+H1ijK+2K4dUB6jl6d8vg=";
+  npmDepsHash = "sha256-45k5dhW0a3bvHFxyGXg3QOxXILXZXtq4KZKKi6gJjWI=";
   npmPackFlags = [ "--ignore-scripts" ];
   nativeBuildInputs = [ gitMinimal makeWrapper ];
 

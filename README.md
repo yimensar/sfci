@@ -6,6 +6,8 @@ Fast, guided Salesforce delivery.
 
 **Early alpha.** The local test suite uses real Git repositories and Git Delta, with simulated Salesforce responses. Live-org acceptance is still required before using this release for production. Versioned Flow deletion is explicitly blocked in this alpha.
 
+Known inherited dependency audit findings are recorded in [the alpha dependency status](docs/security.md). Initial startup measurements are in [performance measurements](docs/performance.md).
+
 ## Start
 
 From the source repository:
