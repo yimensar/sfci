@@ -114,7 +114,7 @@ For example, if UAT is on A and deployment B fails, the next plan for C starts a
 - After a pipeline interruption, inspect Salesforce Deployment Status and restore its operation artifacts before retrying. `resume` can finish polling a known job or retry publishing a receipt after Salesforce succeeded. An ambiguous submission without a returned job ID requires operator reconciliation.
 - A receipt describes the last deployment known to sfci. It does not detect manual changes in an org. Reconcile those changes, or a sandbox refresh, before resetting a verified baseline.
 - Automatic metadata dependency discovery is limited to Git Delta's behavior. A successful delta validation does not prove every external dependency or future full deployment will work.
-- Source snapshots currently reject symbolic links and submodules. Deployments do not run Apex/data migrations, activate feature flags, or promise automatic rollback.
+- Source snapshots currently reject symbolic links, submodules and Git LFS pointers. Deployments do not run Apex/data migrations, activate feature flags, or promise automatic rollback.
 - The first image targets Linux x86-64. Nix development and CLI builds support Apple Silicon macOS and the declared Linux platforms; image builds run on Linux.
 
 ## Develop

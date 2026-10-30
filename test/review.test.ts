@@ -130,3 +130,18 @@ test("an org refresh invalidates a prepared plan before any deployment", async (
     /org behind this alias changed/i,
   );
 });
+
+test("Git LFS pointers cannot be silently deployed as static resource content", async (t) => {
+  const f = await fixture();
+  t.after(f.cleanup);
+  await f.put(
+    "force-app/main/default/staticresources/Asset.resource",
+    `version https://git-lfs.github.com/spec/v1\noid sha256:${"a".repeat(64)}\nsize 4096\n`,
+  );
+  f.git("add", ".");
+  f.git("commit", "-qm", "Resource stored in LFS");
+  await assert.rejects(
+    () => createPlan({ cwd: f.cwd, runtime: f.runtime, target: "uat" }),
+    /Git LFS pointer/,
+  );
+});

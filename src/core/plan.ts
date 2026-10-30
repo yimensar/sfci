@@ -297,6 +297,17 @@ export async function createPlan(
         "SOURCE",
       );
     for (const [name, data] of Object.entries(unzipSync(archive.stdout))) {
+      if (
+        Buffer.from(data.subarray(0, 80))
+          .toString()
+          .startsWith("version https://git-lfs.github.com/spec/v1\n")
+      ) {
+        throw new SfciError(
+          `The source snapshot contains a Git LFS pointer: ${name}.`,
+          "Git LFS payload materialization is not supported in this alpha. sfci will not deploy pointer text as metadata.",
+          "UNSUPPORTED",
+        );
+      }
       const destination = resolve(payload, name);
       if (
         relative(payload, destination).startsWith(`..${sep}`) ||
