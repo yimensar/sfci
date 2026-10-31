@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { readConfig } from "./config.js";
-import { assertCurrent, createPlan, deploymentArgs, loadPlan } from "./plan.js";
+import {
+  assertCurrent,
+  createPlan,
+  deploymentArgs,
+  loadPlan,
+  withExecutionWorkspace,
+} from "./plan.js";
 import { git, privateSalesforceCli } from "./process.js";
 import { identify, jobId, runtime, waitForJob } from "./salesforce.js";
 import {
@@ -46,8 +52,6 @@ const operationFile = (cwd: string, target: string): string =>
   resolve(cwd, ".sfci", "operations", `${target}.json`);
 const validationFile = (plan: Plan): string =>
   resolve(dirname(plan.path), "validation.json");
-const sourceDirectory = (plan: Plan): string =>
-  resolve(dirname(plan.path), "content", "source");
 function reusableValidation(value: unknown, plan: Plan): value is Validation {
   if (typeof value !== "object" || value === null || Array.isArray(value))
     return false;
@@ -260,24 +264,23 @@ export async function validatePlan(
     if (reusableValidation(previous, plan)) return previous;
     let id: string | null = null;
     if (!plan.empty) {
-      const args = await deploymentArgs(plan);
-      const result = await runtime(options).sf(
-        [
-          "project",
-          "deploy",
-          plan.production ? "validate" : "start",
-          ...args,
-          ...(plan.production ? [] : ["--dry-run"]),
-          "--async",
-        ],
-        sourceDirectory(plan),
-      );
-      id = jobId(result);
-      await waitForJob(
-        { ...options, cwd: sourceDirectory(plan) },
-        plan.org,
-        id,
-      );
+      id = await withExecutionWorkspace(plan, options, async (workspace) => {
+        const args = await deploymentArgs(plan, workspace, options);
+        const result = await runtime(options).sf(
+          [
+            "project",
+            "deploy",
+            plan.production ? "validate" : "start",
+            ...args,
+            ...(plan.production ? [] : ["--dry-run", "--ignore-conflicts"]),
+            "--async",
+          ],
+          workspace,
+        );
+        const accepted = jobId(result);
+        await waitForJob({ ...options, cwd: workspace }, plan.org, accepted);
+        return accepted;
+      });
     }
     const result: Validation = {
       schemaVersion: 1,
@@ -412,53 +415,62 @@ export async function applyPlan(
       jobId: null,
       phase: "submitting",
     };
-    await save(operationFile(cwd, plan.target), operation);
     if (!plan.empty) {
-      const args =
-        validation?.quickDeploy && validation.jobId
-          ? [
-              "project",
-              "deploy",
-              "quick",
-              "--target-org",
-              plan.org,
-              "--job-id",
-              validation.jobId,
-              "--async",
-            ]
-          : [
-              "project",
-              "deploy",
-              "start",
-              ...(await deploymentArgs(plan)),
-              "--async",
-            ];
-      let submission: Record<string, unknown>;
-      try {
-        submission = await runtime(options).sf(args, sourceDirectory(plan));
-      } catch {
-        throw new SfciError(
-          "Deployment submission did not return a confirmed job ID.",
-          "Inspect Deployment Status before retrying. The local operation record intentionally blocks a second submission.",
-          "SUBMISSION_UNKNOWN",
-        );
-      }
-      operation = { ...operation, jobId: jobId(submission), phase: "running" };
+      await withExecutionWorkspace(plan, options, async (workspace) => {
+        const args =
+          validation?.quickDeploy && validation.jobId
+            ? [
+                "project",
+                "deploy",
+                "quick",
+                "--target-org",
+                plan.org,
+                "--job-id",
+                validation.jobId,
+                "--async",
+              ]
+            : [
+                "project",
+                "deploy",
+                "start",
+                ...(await deploymentArgs(plan, workspace, options)),
+                "--ignore-conflicts",
+                "--async",
+              ];
+        await save(operationFile(cwd, plan.target), operation);
+        let submission: Record<string, unknown>;
+        try {
+          submission = await runtime(options).sf(args, workspace);
+        } catch {
+          throw new SfciError(
+            "Deployment submission did not return a confirmed job ID.",
+            "Inspect Deployment Status before retrying. The local operation record intentionally blocks a second submission.",
+            "SUBMISSION_UNKNOWN",
+          );
+        }
+        operation = {
+          ...operation,
+          jobId: jobId(submission),
+          phase: "running",
+        };
+        await save(operationFile(cwd, plan.target), operation);
+        try {
+          await waitForJob(
+            { ...options, cwd: workspace },
+            plan.org,
+            operation.jobId!,
+          );
+        } catch (error) {
+          if (
+            error instanceof JobFailedError &&
+            error.result.rollbackOnError === true
+          )
+            await rm(operationFile(cwd, plan.target));
+          throw error;
+        }
+      });
+    } else {
       await save(operationFile(cwd, plan.target), operation);
-      try {
-        await waitForJob(
-          { ...options, cwd: sourceDirectory(plan) },
-          plan.org,
-          operation.jobId!,
-        );
-      } catch (error) {
-        if (
-          error instanceof JobFailedError &&
-          error.result.rollbackOnError === true
-        )
-          await rm(operationFile(cwd, plan.target));
-        throw error;
-      }
     }
     operation = { ...operation, phase: "succeeded" };
     await save(operationFile(cwd, plan.target), operation);
@@ -633,10 +645,12 @@ export async function resume(
       );
     if (operation.phase === "running") {
       try {
-        await waitForJob(
-          { ...options, cwd: sourceDirectory(plan) },
-          plan.org,
-          operation.jobId!,
+        await withExecutionWorkspace(plan, options, (workspace) =>
+          waitForJob(
+            { ...options, cwd: workspace },
+            plan.org,
+            operation.jobId!,
+          ),
         );
       } catch (error) {
         if (

@@ -94,6 +94,8 @@ Use `--yes` to confirm mutations in CI, `--json` for a structured result, and `-
 
 Plans live under `.sfci/plans/<id>/`. Each plan contains its own committed source snapshot, manifests, org identity, configuration fingerprint, and file hashes. Keep the **whole directory**, not just `plan.json`, when moving it between CI steps.
 
+Salesforce commands run in disposable copies so their tracking caches cannot change the immutable snapshot. sfci uses its Git receipts as the delivery baseline; native source-tracking conflicts are ignored in these fresh workspaces. This does not add manual-org drift detection.
+
 ```sh
 sfci check --target uat --plan .sfci/plans/<id>/plan.json
 sfci deploy --target uat --plan .sfci/plans/<id>/plan.json --push

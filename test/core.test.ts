@@ -4,6 +4,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { deploymentArgs, withExecutionWorkspace } from "../src/core/plan.js";
+import { defaultRuntime } from "../src/core/process.js";
 import {
   applyPlan,
   createPlan,
@@ -23,8 +25,34 @@ class FakeSalesforce implements Runtime {
   fail = false;
   disconnect = false;
   rollback = false;
-  async sf(args: string[]): Promise<Record<string, unknown>> {
+  writeTrackingCache = false;
+  workspaces: string[] = [];
+  async sf(args: string[], cwd: string): Promise<Record<string, unknown>> {
     this.calls.push(args);
+    if (args[0] === "project") {
+      this.workspaces.push(cwd);
+      if (this.writeTrackingCache) {
+        const cache = join(
+          cwd,
+          ".sf",
+          "orgs",
+          "00D000000000001AAA",
+          "localSourceTracking",
+        );
+        await mkdir(cache, { recursive: true });
+        await writeFile(join(cache, "generated-cache.json"), "{}");
+      }
+      if (args[1] === "generate" && args[2] === "manifest") {
+        const output = args[args.indexOf("--output-dir") + 1]!;
+        await mkdir(output, { recursive: true });
+        const path = join(output, "package.xml");
+        await writeFile(
+          path,
+          '<Package xmlns="http://soap.sforce.com/2006/04/metadata"><types><members>Remaining</members><name>ApexClass</name></types><version>67.0</version></Package>',
+        );
+        return { path };
+      }
+    }
     const org = args[args.indexOf("--target-org") + 1];
     if (args[0] === "data")
       return {
@@ -650,7 +678,12 @@ test("widening .forceignore requires full mode to include unchanged metadata", a
   const submission = f.runtime.calls.find(
     (args) => args[0] === "project" && args[2] === "start",
   );
-  assert.ok(submission?.includes("--source-dir"));
+  assert.ok(submission?.includes("--manifest"));
+  assert.ok(
+    f.runtime.calls.some(
+      (args) => args.slice(0, 3).join(" ") === "project generate manifest",
+    ),
+  );
   assert.ok(plan.files["source/force-app/main/default/classes/Example.cls"]);
 });
 
@@ -690,4 +723,143 @@ test("package-directory and API-version changes also require full mode", async (
       );
     });
   }
+});
+
+test("Salesforce-generated caches stay outside immutable plan files", async (t) => {
+  const f = await fixture();
+  t.after(f.cleanup);
+  await f.change(2);
+  const plan = await createPlan({
+    cwd: f.cwd,
+    runtime: f.runtime,
+    target: "uat",
+  });
+  f.runtime.writeTrackingCache = true;
+  await validatePlan({ cwd: f.cwd, runtime: f.runtime, planPath: plan.path });
+  assert.equal((await loadPlan(plan.path)).id, plan.id);
+  const receipt = await applyPlan({
+    cwd: f.cwd,
+    runtime: f.runtime,
+    planPath: plan.path,
+    push: false,
+  });
+  assert.equal(receipt.planId, plan.id);
+  assert.equal((await loadPlan(plan.path)).id, plan.id);
+  assert.ok(
+    f.runtime.workspaces.every((path) =>
+      path.startsWith(
+        join(f.git("rev-parse", "--show-toplevel"), ".sfci", "work"),
+      ),
+    ),
+  );
+  await writeFile(
+    join(
+      dirname(plan.path),
+      "content/source/force-app/main/default/classes/Example.cls",
+    ),
+    "tampered",
+  );
+  await assert.rejects(() => loadPlan(plan.path), /files have changed/);
+});
+
+test("full deployments with deletions generate a full manifest accepted by Salesforce flag dependencies", async (t) => {
+  const f = await fixture();
+  t.after(f.cleanup);
+  await f.put(
+    "force-app/main/default/classes/Remaining.cls",
+    "public class Remaining {}",
+  );
+  await f.put(
+    "force-app/main/default/classes/Remaining.cls-meta.xml",
+    '<ApexClass xmlns="http://soap.sforce.com/2006/04/metadata"><apiVersion>67.0</apiVersion><status>Active</status></ApexClass>',
+  );
+  f.git("add", ".");
+  f.git("commit", "-m", "Retain another class");
+  f.git(
+    "rm",
+    "force-app/main/default/classes/Example.cls",
+    "force-app/main/default/classes/Example.cls-meta.xml",
+  );
+  f.git("commit", "-m", "Delete Example");
+  const plan = await createPlan({
+    cwd: f.cwd,
+    runtime: f.runtime,
+    target: "uat",
+    mode: "full",
+  });
+  await applyPlan({
+    cwd: f.cwd,
+    runtime: f.runtime,
+    planPath: plan.path,
+    push: false,
+    allowDestructive: true,
+  });
+  assert.ok(
+    f.runtime.calls.some(
+      (args) => args.slice(0, 3).join(" ") === "project generate manifest",
+    ),
+  );
+  const submission = f.runtime.calls.find(
+    (args) => args.slice(0, 3).join(" ") === "project deploy start",
+  );
+  assert.ok(submission?.includes("--manifest"));
+  assert.ok(submission?.includes("--post-destructive-changes"));
+  assert.equal(submission?.includes("--source-dir"), false);
+  assert.equal((await loadPlan(plan.path)).id, plan.id);
+});
+
+test("the real bundled Salesforce manifest generator honors .forceignore offline", async (t) => {
+  const f = await fixture();
+  t.after(f.cleanup);
+  for (const name of ["Remaining", "Excluded"]) {
+    await f.put(
+      `force-app/main/default/classes/${name}.cls`,
+      `public class ${name} {}`,
+    );
+    await f.put(
+      `force-app/main/default/classes/${name}.cls-meta.xml`,
+      '<ApexClass xmlns="http://soap.sforce.com/2006/04/metadata"><apiVersion>67.0</apiVersion><status>Active</status></ApexClass>',
+    );
+  }
+  await f.put(".forceignore", "**/classes/Excluded.*\n");
+  f.git("add", ".");
+  f.git("commit", "-m", "Add managed and excluded metadata");
+  f.git(
+    "rm",
+    "force-app/main/default/classes/Example.cls",
+    "force-app/main/default/classes/Example.cls-meta.xml",
+  );
+  f.git("commit", "-m", "Delete Example");
+  const plan = await createPlan({
+    cwd: f.cwd,
+    runtime: f.runtime,
+    target: "uat",
+    mode: "full",
+  });
+  const localOnly: Runtime = {
+    sf: (args, cwd) => {
+      assert.deepEqual(
+        args.slice(0, 3),
+        ["project", "generate", "manifest"],
+        "No authenticated or remote Salesforce operation is allowed in this test",
+      );
+      return defaultRuntime.sf(args, cwd);
+    },
+  };
+  await withExecutionWorkspace(plan, { cwd: f.cwd }, async (workspace) => {
+    const args = await deploymentArgs(plan, workspace, {
+      cwd: f.cwd,
+      runtime: localOnly,
+    });
+    const manifest = await readFile(
+      args[args.indexOf("--manifest") + 1]!,
+      "utf8",
+    );
+    assert.match(manifest, /<members>Remaining<\/members>/);
+    assert.doesNotMatch(manifest, /<members>Excluded<\/members>/);
+    assert.doesNotMatch(manifest, /<members>Example<\/members>/);
+    assert.ok(args.includes("--post-destructive-changes"));
+    assert.equal(args.includes("--source-dir"), false);
+  });
+  assert.equal((await loadPlan(plan.path)).id, plan.id);
 });

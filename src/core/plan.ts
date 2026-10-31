@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
   mkdir,
+  cp,
+  mkdtemp,
   readFile,
   readdir,
   rename,
@@ -11,7 +13,7 @@ import { dirname, posix, relative, resolve, sep } from "node:path";
 import { unzipSync } from "fflate";
 import { readConfig } from "./config.js";
 import { execute, git } from "./process.js";
-import { assertTests, identify } from "./salesforce.js";
+import { assertTests, identify, runtime } from "./salesforce.js";
 import {
   canonical,
   clean,
@@ -451,15 +453,58 @@ export async function createPlan(
   }
 }
 
-export async function deploymentArgs(plan: Plan): Promise<string[]> {
+export async function withExecutionWorkspace<T>(
+  plan: Plan,
+  options: Options,
+  task: (workspace: string) => Promise<T>,
+): Promise<T> {
+  const workRoot = resolve(await root(options.cwd), ".sfci", "work");
+  await mkdir(workRoot, { recursive: true });
+  const workspace = await mkdtemp(
+    resolve(workRoot, `${plan.id.slice(0, 12)}-`),
+  );
+  try {
+    await cp(resolve(dirname(plan.path), "content", "source"), workspace, {
+      recursive: true,
+    });
+    return await task(workspace);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+}
+
+export async function deploymentArgs(
+  plan: Plan,
+  workspace: string,
+  options: Options,
+): Promise<string[]> {
   const content = resolve(dirname(plan.path), "content");
   const args = ["--target-org", plan.org, "--test-level", plan.tests];
   if (plan.mode === "full") {
     const project = await json<{ packageDirectories: { path: string }[] }>(
-      resolve(content, "source", "sfdx-project.json"),
+      resolve(workspace, "sfdx-project.json"),
     );
-    for (const item of project.packageDirectories)
-      args.push("--source-dir", resolve(content, "source", item.path));
+    const sourceArgs = project.packageDirectories.flatMap((item) => [
+      "--source-dir",
+      resolve(workspace, item.path),
+    ]);
+    // Destructive flags require --manifest. It also avoids caching --source-dir paths
+    // into a disposable workspace, so the job can be reported from a later workspace.
+    const output = resolve(workspace, ".sfci-manifests");
+    await runtime(options).sf(
+      [
+        "project",
+        "generate",
+        "manifest",
+        ...sourceArgs,
+        "--output-dir",
+        output,
+      ],
+      workspace,
+    );
+    const manifest = resolve(output, "package.xml");
+    await readFile(manifest, "utf8");
+    args.push("--manifest", manifest);
   } else
     args.push(
       "--manifest",
