@@ -1,6 +1,6 @@
 {
   "name": "@yimensar/sfci",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Fast, guided Salesforce delivery. Git in, verified deployments out.",
   "license": "MIT",
   "author": "Yan Imensar",
@@ -41,6 +41,7 @@
   "dependencies": {
     "@clack/prompts": "1.8.1",
     "@salesforce/cli": "2.156.8",
+    "@salesforce/source-deploy-retrieve": "13.10.0",
     "commander": "15.0.0",
     "fflate": "0.8.3",
     "sfdx-git-delta": "6.45.1",

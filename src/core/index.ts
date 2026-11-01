@@ -3,6 +3,15 @@ import { access, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { readConfig } from "./config.js";
 import {
+  assertNoRemoteClaim,
+  checkpoint,
+  hasOrigin,
+  pendingError,
+  releaseClaim,
+  remoteClaim,
+  type Claim,
+} from "./coordination.js";
+import {
   assertCurrent,
   createPlan,
   deploymentArgs,
@@ -88,9 +97,6 @@ function matchTarget(plan: Plan, target?: string): void {
       "Use the intended target or create a new plan.",
       "TARGET",
     );
-}
-async function hasOrigin(cwd: string): Promise<boolean> {
-  return (await git(cwd, "remote")).split("\n").includes("origin");
 }
 async function fetchState(options: Options): Promise<string> {
   const cwd = await root(options.cwd);
@@ -200,11 +206,15 @@ export async function status(options: Options & { target?: string }): Promise<{
     } catch (error) {
       if (error instanceof SfciError) throw error;
     }
+    const receipt = await baseline(cwd, target);
+    const remote = receipt ? await remoteClaim(cwd, receipt.orgId) : null;
+    if (remote?.value.operation) pending = remote.value.operation;
     environments.push({
       target,
       org: env.org,
-      receipt: await baseline(cwd, target),
+      receipt,
       pending,
+      checkpoint: remote?.value ?? null,
     });
   }
   return { trunk: config.trunk, environments };
@@ -224,6 +234,8 @@ export async function setBaseline(
   const sha = await commit(cwd, options.commit);
   const org = await identify({ ...options, cwd }, env.org);
   return locked(cwd, org.orgId, async () => {
+    await assertNoRemoteClaim(cwd, org.orgId);
+    await refresh(cwd, config.trunk);
     try {
       await access(operationFile(cwd, options.target));
       throw new SfciError(
@@ -234,6 +246,21 @@ export async function setBaseline(
     } catch (error) {
       if (error instanceof SfciError) throw error;
     }
+    const push = options.push ?? (await hasOrigin(cwd));
+    const claim = push
+      ? await checkpoint(
+          cwd,
+          {
+            schemaVersion: 1,
+            target: options.target,
+            orgId: org.orgId,
+            commit: sha,
+            operation: null,
+          },
+          null,
+        )
+      : null;
+    await refresh(cwd, config.trunk);
     const receipt = makeReceipt(
       options.target,
       org.orgId,
@@ -242,17 +269,19 @@ export async function setBaseline(
       null,
       null,
     );
-    await writeReceipt(cwd, receipt, options.push ?? (await hasOrigin(cwd)));
+    await writeReceipt(cwd, receipt, push);
+    if (claim) await releaseClaim(cwd, claim);
     return receipt;
   });
 }
 export async function validatePlan(
-  options: Options & { planPath: string; target?: string },
+  options: Options & { planPath: string; target?: string; refresh?: boolean },
 ): Promise<Validation> {
   const cwd = await fetchState(options);
   const plan = await loadPlan(options.planPath);
   matchTarget(plan, options.target);
   return locked(cwd, plan.orgId, async () => {
+    await assertNoRemoteClaim(cwd, plan.orgId);
     await refresh(cwd, plan.trunk);
     await assertCurrent({ ...options, cwd }, plan);
     let previous: unknown;
@@ -261,7 +290,7 @@ export async function validatePlan(
     } catch {
       /* No readable cached validation. */
     }
-    if (reusableValidation(previous, plan)) return previous;
+    if (!options.refresh && reusableValidation(previous, plan)) return previous;
     let id: string | null = null;
     if (!plan.empty) {
       id = await withExecutionWorkspace(plan, options, async (workspace) => {
@@ -300,18 +329,28 @@ async function recordSuccess(
   options: Options & { push?: boolean },
   plan: Plan,
   operation: Operation,
+  claim: Claim | null,
 ): Promise<Receipt> {
   const cwd = await root(options.cwd);
   let receipt = operation.receipt;
   if (!receipt) {
     const previous = await requireBaseline(cwd, plan.target);
-    if (previous.tag !== plan.baselineTag)
+    // An old artifact may predate publication, even after a later deployment.
+    receipt = (await receipts(cwd, plan.target)).find(
+      (value) =>
+        value.kind === "deployment" &&
+        value.planId === plan.id &&
+        value.orgId === plan.orgId &&
+        value.commit === plan.to &&
+        value.jobId === operation.jobId,
+    );
+    if (!receipt && previous.tag !== plan.baselineTag)
       throw new SfciError(
         "Another receipt advanced the baseline while the deployment was running.",
         "Reconcile the org and receipt history; this successful operation remains recorded locally.",
         "CONCURRENT_DEPLOYMENT",
       );
-    receipt = makeReceipt(
+    receipt ??= makeReceipt(
       plan.target,
       plan.orgId,
       plan.to,
@@ -321,9 +360,12 @@ async function recordSuccess(
     );
     operation = { ...operation, phase: "succeeded", receipt };
     await save(operationFile(cwd, plan.target), operation);
+    if (claim)
+      claim = await checkpoint(cwd, { ...claim.value, operation }, claim);
   }
   try {
     await writeReceipt(cwd, receipt, options.push ?? (await hasOrigin(cwd)));
+    if (claim) await releaseClaim(cwd, claim);
   } catch (error) {
     throw new SfciError(
       "Salesforce succeeded, but its deployment receipt could not be published.",
@@ -331,27 +373,11 @@ async function recordSuccess(
       "RECEIPT_PENDING",
     );
   }
-  await rm(operationFile(cwd, plan.target));
+  await rm(operationFile(cwd, plan.target), { force: true });
   return receipt;
 }
-export async function applyPlan(
-  options: Options & {
-    planPath: string;
-    target?: string;
-    allowDestructive?: boolean;
-    push?: boolean;
-  },
-): Promise<Receipt> {
-  const cwd = await fetchState(options);
+async function assertDeployable(cwd: string, plan: Plan): Promise<void> {
   const config = await readConfig(cwd);
-  const plan = await loadPlan(options.planPath);
-  matchTarget(plan, options.target);
-  if (plan.destructive.length && !options.allowDestructive)
-    throw new SfciError(
-      "The plan includes metadata deletions.",
-      "Review the plan, then pass --allow-destructive to deploy those deletions.",
-      "DESTRUCTIVE",
-    );
   const trunk = await commit(
     cwd,
     (await hasOrigin(cwd))
@@ -385,6 +411,25 @@ export async function applyPlan(
       "STALE_CANDIDATE",
     );
   }
+}
+export async function applyPlan(
+  options: Options & {
+    planPath: string;
+    target?: string;
+    allowDestructive?: boolean;
+    push?: boolean;
+  },
+): Promise<Receipt> {
+  const cwd = await fetchState(options);
+  const plan = await loadPlan(options.planPath);
+  matchTarget(plan, options.target);
+  if (plan.destructive.length && !options.allowDestructive)
+    throw new SfciError(
+      "The plan includes metadata deletions.",
+      "Review the plan, then pass --allow-destructive to deploy those deletions.",
+      "DESTRUCTIVE",
+    );
+  await assertDeployable(cwd, plan);
   // Validation holds its own lock. The apply lock is acquired afterwards and checks the baseline again.
   const validation = plan.production
     ? await validatePlan({
@@ -394,8 +439,10 @@ export async function applyPlan(
       })
     : null;
   return locked(cwd, plan.orgId, async () => {
+    await assertNoRemoteClaim(cwd, plan.orgId);
     await refresh(cwd, plan.trunk);
     await assertCurrent({ ...options, cwd }, plan);
+    await assertDeployable(cwd, plan);
     try {
       await access(operationFile(cwd, plan.target));
       throw new SfciError(
@@ -414,6 +461,34 @@ export async function applyPlan(
       planId: plan.id,
       jobId: null,
       phase: "submitting",
+    };
+    const push = options.push ?? (await hasOrigin(cwd));
+    let claim: Claim | null = push
+      ? await checkpoint(
+          cwd,
+          {
+            schemaVersion: 1,
+            target: plan.target,
+            orgId: plan.orgId,
+            commit: plan.to,
+            operation,
+          },
+          null,
+        )
+      : null;
+    // Once reserved, refresh again: another runner may just have published its receipt.
+    try {
+      await refresh(cwd, plan.trunk);
+      await assertCurrent({ ...options, cwd }, plan);
+      await assertDeployable(cwd, plan);
+    } catch (error) {
+      if (claim) await releaseClaim(cwd, claim);
+      throw error;
+    }
+    const persist = async (): Promise<void> => {
+      await save(operationFile(cwd, plan.target), operation);
+      if (claim)
+        claim = await checkpoint(cwd, { ...claim.value, operation }, claim);
     };
     if (!plan.empty) {
       await withExecutionWorkspace(plan, options, async (workspace) => {
@@ -453,7 +528,7 @@ export async function applyPlan(
           jobId: jobId(submission),
           phase: "running",
         };
-        await save(operationFile(cwd, plan.target), operation);
+        await persist();
         try {
           await waitForJob(
             { ...options, cwd: workspace },
@@ -464,17 +539,19 @@ export async function applyPlan(
           if (
             error instanceof JobFailedError &&
             error.result.rollbackOnError === true
-          )
-            await rm(operationFile(cwd, plan.target));
+          ) {
+            if (claim) await releaseClaim(cwd, claim);
+            await rm(operationFile(cwd, plan.target), { force: true });
+          }
           throw error;
         }
       });
     } else {
-      await save(operationFile(cwd, plan.target), operation);
+      await persist();
     }
     operation = { ...operation, phase: "succeeded" };
-    await save(operationFile(cwd, plan.target), operation);
-    return recordSuccess({ ...options, cwd }, plan, operation);
+    await persist();
+    return recordSuccess({ ...options, cwd }, plan, operation, claim);
   });
 }
 export async function createRelease(
@@ -588,14 +665,84 @@ export async function resume(
   options: TargetOptions & { push?: boolean },
 ): Promise<Receipt> {
   const cwd = await fetchState(options);
-  const operation = await json<Operation>(operationFile(cwd, options.target));
+  const env = (await readConfig(cwd)).environments[options.target];
+  if (!env)
+    throw new SfciError(
+      `Unknown environment ${options.target}.`,
+      undefined,
+      "CONFIG",
+    );
+  const org = await identify({ ...options, cwd }, env.org);
+  let claim = await remoteClaim(cwd, org.orgId);
+  if (
+    claim &&
+    (claim.value.target !== options.target || !claim.value.operation)
+  )
+    throw pendingError(claim);
+  const push = options.push ?? (await hasOrigin(cwd));
+  if (claim && !push)
+    throw new SfciError(
+      "This operation is coordinated on origin.",
+      "Resume it with --push to publish its receipt and clear the checkpoint.",
+      "REMOTE_STATE",
+    );
+  let operation: Operation | undefined;
+  try {
+    await access(operationFile(cwd, options.target));
+    operation = await json<Operation>(operationFile(cwd, options.target));
+  } catch (error) {
+    if (error instanceof SfciError) throw error;
+  }
+  const remote = claim?.value.operation;
+  if (remote) {
+    if (
+      operation &&
+      (operation.planId !== remote.planId ||
+        (operation.jobId && remote.jobId && operation.jobId !== remote.jobId))
+    )
+      throw new SfciError(
+        "Local and remote operations disagree.",
+        "Inspect both checkpoints before continuing.",
+        "OPERATION",
+      );
+    const phases = ["submitting", "running", "succeeded"];
+    if (
+      !operation ||
+      phases.indexOf(remote.phase) > phases.indexOf(operation.phase) ||
+      remote.receipt
+    )
+      operation = remote;
+  }
+  if (!operation)
+    throw new SfciError(
+      "No pending operation for this target.",
+      "Run sfci status to inspect recorded deployments.",
+      "OPERATION",
+    );
   if (
     operation.schemaVersion !== 1 ||
     operation.target !== options.target ||
+    !/^[a-f0-9]{64}$/.test(operation.planId) ||
     !["submitting", "running", "succeeded"].includes(operation.phase)
   )
     throw new SfciError("Invalid operation record.", undefined, "OPERATION");
-  const plan = await loadPlan(resolve(cwd, operation.planPath));
+  const planPath = resolve(
+    cwd,
+    ".sfci",
+    "plans",
+    operation.planId,
+    "plan.json",
+  );
+  try {
+    await access(planPath);
+  } catch {
+    throw new SfciError(
+      "The pending operation's plan artifact is missing.",
+      "Restore its .sfci/plans directory from the original CI run, then resume. If the artifact was lost, reconcile Salesforce Deployment Status before clearing the remote checkpoint.",
+      "ARTIFACT",
+    );
+  }
+  const plan = await loadPlan(planPath);
   matchTarget(plan, options.target);
   if (operation.planId !== plan.id || operation.orgId !== plan.orgId)
     throw new SfciError(
@@ -643,6 +790,21 @@ export async function resume(
         "Inspect Deployment Status and reconcile the org before removing the operation record. sfci will not guess or submit it again.",
         "SUBMISSION_UNKNOWN",
       );
+    if (push)
+      claim = await checkpoint(
+        cwd,
+        claim
+          ? { ...claim.value, operation }
+          : {
+              schemaVersion: 1,
+              target: plan.target,
+              orgId: plan.orgId,
+              commit: plan.to,
+              operation,
+            },
+        claim,
+      );
+    await refresh(cwd, plan.trunk);
     if (operation.phase === "running") {
       try {
         await withExecutionWorkspace(plan, options, (workspace) =>
@@ -656,14 +818,21 @@ export async function resume(
         if (
           error instanceof JobFailedError &&
           error.result.rollbackOnError === true
-        )
-          await rm(operationFile(cwd, plan.target));
+        ) {
+          if (claim) await releaseClaim(cwd, claim);
+          await rm(operationFile(cwd, plan.target), { force: true });
+        }
         throw error;
       }
     }
-    return recordSuccess({ ...options, cwd }, plan, {
-      ...operation,
-      phase: "succeeded",
-    });
+    return recordSuccess(
+      { ...options, cwd },
+      plan,
+      {
+        ...operation,
+        phase: "succeeded",
+      },
+      claim,
+    );
   });
 }

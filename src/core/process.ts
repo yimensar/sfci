@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { SfciError, type Runtime } from "./types.js";
+import { SF_VERSION } from "../toolchain.js";
 
 export function execute(
   file: string,
@@ -59,7 +60,7 @@ export function salesforceEnvironment(): NodeJS.ProcessEnv {
     SF_DISABLE_TELEMETRY: "true",
     SF_USE_PROGRESS_BAR: "false",
     // Isolate oclif's user plugin inventory; auth still uses ~/.sf and ~/.sfdx.
-    SF_DATA_DIR: resolve(homedir(), ".cache", "sfci", "salesforce-2.156.8"),
+    SF_DATA_DIR: resolve(homedir(), ".cache", "sfci", `salesforce-${SF_VERSION}`),
     NO_COLOR: "1",
   };
   delete environment.FORCE_COLOR;

@@ -95,12 +95,18 @@ export class JobFailedError extends SfciError {
   constructor(
     public jobId: string,
     public result: Record<string, unknown>,
+    diagnostics?: string,
   ) {
     super(
       `Salesforce job ${jobId} finished with status ${String(result.status)}.`,
-      result.rollbackOnError === true
-        ? "Salesforce reports rollback-on-error. The baseline was not advanced; correct the failure before retrying."
-        : "Inspect Deployment Status and reconcile org state before clearing the local operation record.",
+      [
+        diagnostics,
+        result.rollbackOnError === true
+          ? "Salesforce reports rollback-on-error. The baseline was not advanced; correct the failure before retrying."
+          : "Inspect Deployment Status and reconcile org state before clearing the local operation record.",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
       "DEPLOYMENT_FAILED",
     );
   }

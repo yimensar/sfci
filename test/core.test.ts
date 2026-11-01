@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -394,7 +402,19 @@ test("resume finishes an accepted job instead of submitting a second deployment"
 test("receipt publication can be retried without redeploying a successful job", async (t) => {
   const f = await fixture();
   t.after(f.cleanup);
+  const origin = join(f.cwd, ".sfci", "origin.git");
+  f.git("init", "--bare", origin);
+  f.git("remote", "add", "origin", origin);
+  f.git("push", "origin", "main", "--tags");
+  const hook = join(origin, "hooks", "pre-receive");
+  await writeFile(
+    hook,
+    '#!/bin/sh\nwhile read old new ref; do\n case "$ref" in refs/tags/sfci/uat/*) exit 1;; esac\ndone\n',
+  );
+  await chmod(hook, 0o755);
+
   await f.change(2);
+  f.git("push", "origin", "main");
   const plan = await createPlan({
     cwd: f.cwd,
     runtime: f.runtime,
@@ -414,11 +434,12 @@ test("receipt publication can be retried without redeploying a successful job", 
     ?.pending;
   assert.equal(pending?.phase, "succeeded");
   assert.ok(pending?.receipt);
+  await rm(hook);
   const receipt = await resume({
     cwd: f.cwd,
     runtime: f.runtime,
     target: "uat",
-    push: false,
+    push: true,
   });
   assert.equal(receipt.tag, pending?.receipt?.tag);
   assert.equal(
@@ -666,8 +687,8 @@ test("widening .forceignore requires full mode to include unchanged metadata", a
   assert.equal(plan.empty, false);
   assert.equal(
     plan.components,
-    0,
-    "The newly included class is unchanged, so Git Delta alone would miss it",
+    1,
+    "The full manifest includes unchanged metadata that entered the managed scope",
   );
   await applyPlan({
     cwd: f.cwd,
@@ -680,7 +701,7 @@ test("widening .forceignore requires full mode to include unchanged metadata", a
   );
   assert.ok(submission?.includes("--manifest"));
   assert.ok(
-    f.runtime.calls.some(
+    !f.runtime.calls.some(
       (args) => args.slice(0, 3).join(" ") === "project generate manifest",
     ),
   );
@@ -795,7 +816,7 @@ test("full deployments with deletions generate a full manifest accepted by Sales
     allowDestructive: true,
   });
   assert.ok(
-    f.runtime.calls.some(
+    !f.runtime.calls.some(
       (args) => args.slice(0, 3).join(" ") === "project generate manifest",
     ),
   );
@@ -808,7 +829,7 @@ test("full deployments with deletions generate a full manifest accepted by Sales
   assert.equal((await loadPlan(plan.path)).id, plan.id);
 });
 
-test("the real bundled Salesforce manifest generator honors .forceignore offline", async (t) => {
+test("the official Salesforce resolver honors .forceignore offline", async (t) => {
   const f = await fixture();
   t.after(f.cleanup);
   for (const name of ["Remaining", "Excluded"]) {
@@ -862,4 +883,149 @@ test("the real bundled Salesforce manifest generator honors .forceignore offline
     assert.equal(args.includes("--source-dir"), false);
   });
   assert.equal((await loadPlan(plan.path)).id, plan.id);
+});
+
+test("a fresh runner discovers an interrupted job on origin and resumes its exact restored plan", async (t) => {
+  const f = await fixture();
+  t.after(f.cleanup);
+  await f.change(2);
+  const origin = join(f.cwd, ".sfci", "origin.git");
+  f.git("init", "--bare", origin);
+  f.git("remote", "add", "origin", origin);
+  f.git("push", "origin", "main", "--tags");
+  const plan = await createPlan({
+    cwd: f.cwd,
+    runtime: f.runtime,
+    target: "uat",
+  });
+  f.runtime.disconnect = true;
+  await assert.rejects(
+    () =>
+      applyPlan({
+        cwd: f.cwd,
+        runtime: f.runtime,
+        planPath: plan.path,
+        push: true,
+      }),
+    /Connection interrupted/,
+  );
+  const fresh = join(f.cwd, ".sfci", "runner");
+  f.git("clone", "--branch", "main", origin, fresh);
+  const state = await status({ cwd: fresh, target: "uat" });
+  assert.equal(state.environments[0]?.pending?.jobId, "0Af000000000001AAA");
+  const freshPlan = await createPlan({
+    cwd: fresh,
+    runtime: f.runtime,
+    target: "uat",
+  });
+  await assert.rejects(
+    () =>
+      applyPlan({
+        cwd: fresh,
+        runtime: f.runtime,
+        planPath: freshPlan.path,
+        push: true,
+      }),
+    /unfinished operation/,
+  );
+  // The same deterministic plan can be prepared on another runner, or restored from its artifact.
+  await rm(dirname(freshPlan.path), { recursive: true });
+  await assert.rejects(
+    () => resume({ cwd: fresh, runtime: f.runtime, target: "uat", push: true }),
+    /plan artifact is missing/,
+  );
+  await cp(dirname(plan.path), dirname(freshPlan.path), { recursive: true });
+  f.runtime.disconnect = false;
+  const receipt = await resume({
+    cwd: fresh,
+    runtime: f.runtime,
+    target: "uat",
+    push: true,
+  });
+  assert.equal(receipt.planId, plan.id);
+  assert.equal(
+    (await status({ cwd: f.cwd, target: "uat" })).environments[0]?.pending
+      ?.jobId,
+    "0Af000000000001AAA",
+    "The old runner still has a local checkpoint until it reconciles",
+  );
+  assert.equal(
+    (await status({ cwd: fresh, target: "uat" })).environments[0]?.pending,
+    null,
+  );
+  // A later deployment must not prevent cleanup of an older successful artifact.
+  await f.change(3);
+  f.git("push", "origin", "main");
+  f.git("-C", fresh, "fetch", "origin", "main");
+  f.git("-C", fresh, "reset", "--hard", "FETCH_HEAD");
+  const later = await deploy({
+    cwd: fresh,
+    runtime: f.runtime,
+    target: "uat",
+    push: true,
+  });
+  const again = await resume({
+    cwd: f.cwd,
+    runtime: f.runtime,
+    target: "uat",
+    push: true,
+  });
+  assert.equal(again.tag, receipt.tag);
+  assert.equal(
+    (await status({ cwd: fresh, target: "uat" })).environments[0]?.receipt?.tag,
+    later.tag,
+  );
+  assert.equal(
+    f.runtime.calls.filter((a) => a[0] === "project" && a[2] === "start")
+      .length,
+    2,
+  );
+});
+
+test("final trunk eligibility is rechecked after production validation", async (t) => {
+  const f = await fixture();
+  t.after(f.cleanup);
+  await f.put(
+    "sfci.yml",
+    "trunk: main\nenvironments:\n  prod:\n    org: prod\n",
+  );
+  f.git("add", ".");
+  f.git("commit", "-m", "Direct trunk production");
+  await f.change(2);
+  const plan = await createPlan({
+    cwd: f.cwd,
+    runtime: f.runtime,
+    target: "prod",
+  });
+  const runtime: Runtime = {
+    sf: async (args, cwd) => {
+      const result = await f.runtime.sf(args, cwd);
+      if (args.includes("report")) await f.change(9);
+      return result;
+    },
+  };
+  await assert.rejects(
+    () => applyPlan({ cwd: f.cwd, runtime, planPath: plan.path, push: false }),
+    /no longer the current trunk/,
+  );
+  assert.equal(f.runtime.calls.filter((a) => a[2] === "quick").length, 0);
+});
+
+test("check --refresh bypasses an otherwise reusable validation", async (t) => {
+  const f = await fixture();
+  t.after(f.cleanup);
+  await f.change(2);
+  const plan = await createPlan({
+    cwd: f.cwd,
+    runtime: f.runtime,
+    target: "uat",
+  });
+  await validatePlan({ cwd: f.cwd, runtime: f.runtime, planPath: plan.path });
+  await validatePlan({
+    cwd: f.cwd,
+    runtime: f.runtime,
+    planPath: plan.path,
+    refresh: true,
+  });
+  assert.equal(f.runtime.calls.filter((a) => a[2] === "start").length, 2);
 });

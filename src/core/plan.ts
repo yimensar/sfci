@@ -11,9 +11,11 @@ import {
 } from "node:fs/promises";
 import { dirname, posix, relative, resolve, sep } from "node:path";
 import { unzipSync } from "fflate";
+import { TOOLCHAIN } from "../toolchain.js";
+import { ComponentSet } from "@salesforce/source-deploy-retrieve";
 import { readConfig } from "./config.js";
 import { execute, git } from "./process.js";
-import { assertTests, identify, runtime } from "./salesforce.js";
+import { assertTests, identify } from "./salesforce.js";
 import {
   canonical,
   clean,
@@ -33,7 +35,6 @@ import {
   type TargetOptions,
 } from "./types.js";
 
-const TOOLCHAIN = "sfci/0.1.0-alpha.1;sgd/6.45.1;sf/2.156.8";
 type SalesforceProject = {
   packageDirectories?: { path?: unknown }[];
   sourceApiVersion?: string;
@@ -137,17 +138,12 @@ export async function fileHashes(
   }
   return files;
 }
-export function manifestMembers(xml: string): string[] {
-  const entries: string[] = [];
-  for (const group of xml.matchAll(/<types>([\s\S]*?)<\/types>/g)) {
-    const name = /<name>([^<]+)<\/name>/.exec(group[1] ?? "")?.[1];
-    if (!name) continue;
-    for (const member of (group[1] ?? "").matchAll(
-      /<members>([^<]+)<\/members>/g,
-    ))
-      entries.push(`${name}:${member[1]}`);
-  }
-  return entries;
+export async function manifestMembers(manifestPath: string): Promise<string[]> {
+  const components = await ComponentSet.fromManifest(manifestPath);
+  return Array.from(
+    components,
+    (component) => `${component.type.name}:${component.fullName}`,
+  ).sort();
 }
 function binding(plan: Plan): Omit<Plan, "id" | "path"> {
   const { id: _id, path: _path, ...rest } = plan;
@@ -389,14 +385,25 @@ export async function createPlan(
         result.warnings.map((error) => error.message).join("\n"),
         "DELTA",
       );
-    const constructive = manifestMembers(
-      await readFile(resolve(deltaDirectory, "package", "package.xml"), "utf8"),
-    );
-    const destructive = manifestMembers(
-      await readFile(
-        resolve(deltaDirectory, "destructiveChanges", "destructiveChanges.xml"),
-        "utf8",
-      ),
+    const deltaManifest = resolve(deltaDirectory, "package", "package.xml");
+    let manifest = deltaManifest;
+    if (options.mode === "full") {
+      const components = ComponentSet.fromSource(
+        source.map((path) => resolve(payload, path)),
+      );
+      const delta = await ComponentSet.fromManifest(deltaManifest);
+      // Keep manifest generation offline and bound to the committed project/API
+      // version selected by Git Delta, rather than the user's local CLI settings.
+      if (delta.sourceApiVersion)
+        components.sourceApiVersion = delta.sourceApiVersion;
+      components.projectDirectory = payload;
+      manifest = resolve(content, "full", "package.xml");
+      await mkdir(dirname(manifest), { recursive: true });
+      await writeFile(manifest, await components.getPackageXml());
+    }
+    const constructive = await manifestMembers(manifest);
+    const destructive = await manifestMembers(
+      resolve(deltaDirectory, "destructiveChanges", "destructiveChanges.xml"),
     );
     if (
       destructive.some(
@@ -424,10 +431,7 @@ export async function createPlan(
       tests: env.tests,
       components: constructive.length,
       destructive,
-      empty:
-        options.mode !== "full" &&
-        constructive.length === 0 &&
-        destructive.length === 0,
+      empty: constructive.length === 0 && destructive.length === 0,
       files: await fileHashes(content),
       configHash: hash(canonical(config)),
       toolchain: TOOLCHAIN,
@@ -475,35 +479,19 @@ export async function withExecutionWorkspace<T>(
 
 export async function deploymentArgs(
   plan: Plan,
-  workspace: string,
-  options: Options,
+  _workspace: string,
+  _options: Options,
 ): Promise<string[]> {
   const content = resolve(dirname(plan.path), "content");
   const args = ["--target-org", plan.org, "--test-level", plan.tests];
   if (plan.mode === "full") {
-    const project = await json<{ packageDirectories: { path: string }[] }>(
-      resolve(workspace, "sfdx-project.json"),
-    );
-    const sourceArgs = project.packageDirectories.flatMap((item) => [
-      "--source-dir",
-      resolve(workspace, item.path),
-    ]);
-    // Destructive flags require --manifest. It also avoids caching --source-dir paths
-    // into a disposable workspace, so the job can be reported from a later workspace.
-    const output = resolve(workspace, ".sfci-manifests");
-    await runtime(options).sf(
-      [
-        "project",
-        "generate",
-        "manifest",
-        ...sourceArgs,
-        "--output-dir",
-        output,
-      ],
-      workspace,
-    );
-    const manifest = resolve(output, "package.xml");
-    await readFile(manifest, "utf8");
+    const manifest = resolve(content, "full", "package.xml");
+    if (!plan.files["full/package.xml"])
+      throw new SfciError(
+        "This full plan does not contain a prepared manifest.",
+        "Create a new full plan with this sfci version.",
+        "STALE_PLAN",
+      );
     args.push("--manifest", manifest);
   } else
     args.push(

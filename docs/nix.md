@@ -3,7 +3,15 @@
 The flake pins Nixpkgs through `flake.lock`. npm dependencies are pinned by
 `package-lock.json` and checked by the fixed-output dependency hash in
 `nix/package.nix`. The CLI, its private Salesforce CLI, Git Delta, Node and Git
-are built together. No plugin installation runs when a CI job starts.
+are pinned together. No plugin installation runs when a CI job starts.
+
+The dependency derivation reads only `package.json` and `package-lock.json`.
+Its production output contains the runtime modules; a separate development
+output supplies the compiler and tests during the application build. The small
+application links to the production modules instead of copying them. Changing
+only sfci source therefore preserves the dependency store path and allows the
+image builder to reuse its large dependency layer. There is still one CLI to
+install and one image to run.
 
 ## Develop
 
@@ -43,7 +51,7 @@ On Linux, or with a configured Linux builder:
 ```sh
 nix build .#image
 docker load --input result
-docker run --rm ghcr.io/yimensar/sfci:0.1.0-alpha.1 sfci --help
+docker run --rm ghcr.io/yimensar/sfci:0.1.0-alpha.2 sfci --help
 ```
 
 The image is built by `dockerTools.buildLayeredImage`; constructing it does not
@@ -73,7 +81,7 @@ For an interactive checkout, mount it and preserve the runner's user identity:
 docker run --rm -it \
   --user 1000:1000 \
   --volume "$PWD:/workspace" \
-  ghcr.io/yimensar/sfci:0.1.0-alpha.1 sfci status
+  ghcr.io/yimensar/sfci:0.1.0-alpha.2 sfci status
 ```
 
 CI services can run the image with their usual user and credentials mechanism.
@@ -111,7 +119,21 @@ node scripts/normalize-lock.mjs
 nix run --inputs-from . nixpkgs#prefetch-npm-deps -- package-lock.json
 ```
 
-Put the printed `sha256-…` value into `npmDepsHash` in `nix/package.nix`, then run
+Put the printed `sha256-…` value into the dependency derivation’s `npmDepsHash`
+in `nix/package.nix`, then run
 `npm run check` and `nix flake check`. Review `flake.lock` updates independently
 with `nix flake update`. Commit the lockfiles together with their intended source
 changes. No dependency update should happen as a side effect of `sfci deploy`.
+
+## Check dependency reuse
+
+```sh
+nix eval --raw .#sfci.dependencies.outPath
+nix eval --raw .#sfci.outPath
+```
+
+Repeat after an sfci source-only change. The application path changes, while
+`dependencies.outPath` stays the same. A lockfile, package metadata, Node or
+packaging change can legitimately rebuild dependencies. On Linux, compare image
+layer digests as well when changing image construction; store-path stability
+alone is not a measurement of registry download time.

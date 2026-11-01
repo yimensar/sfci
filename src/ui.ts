@@ -1,4 +1,7 @@
 import { inspect } from "node:util";
+import { makeRedactor, redact } from "./redact.js";
+
+export { redact } from "./redact.js";
 
 export interface OutputOptions {
   json: boolean;
@@ -138,8 +141,17 @@ function printPlan(plan: Record<string, unknown>): void {
   );
   process.stdout.write(`  ${short(plan.from)} → ${short(plan.to)}\n`);
   process.stdout.write(
-    `  ${plan.mode === "full" ? "Full configured source scope" : `${String(plan.components ?? 0)} changed metadata component(s)`}, ${asArray(plan.destructive).length} deletion(s)\n`,
+    `  ${plan.mode === "full" ? "Full scope" : "Delta"} · ${String(plan.components ?? 0)} component(s), ${asArray(plan.destructive).length} deletion(s)\n`,
   );
+  process.stdout.write(
+    `  ${String(plan.org)} (${plan.production ? "production" : "sandbox"}) · ${String(plan.tests)}\n`,
+  );
+  for (const entry of asArray(plan.destructive).slice(0, 8))
+    process.stdout.write(`  Delete ${String(entry)}\n`);
+  if (asArray(plan.destructive).length > 8)
+    process.stdout.write(
+      "  See the destructive manifest for remaining deletions.\n",
+    );
   if (plan.path) process.stdout.write(`  ${String(plan.path)}\n`);
 }
 
@@ -158,7 +170,7 @@ function printStatus(result: unknown): void {
     process.stdout.write(
       `${String(target)} · ${receipt.commit ? short(receipt.commit) : item.commit ? short(item.commit) : "no baseline"}\n`,
     );
-    if (item.pending)
+    if (item.pending || item.checkpoint)
       process.stdout.write(
         "  An operation needs attention. Run sfci resume for this target.\n",
       );
@@ -182,28 +194,6 @@ export function reportError(error: unknown, options: OutputOptions): void {
   }
   if (options.verbose && error instanceof Error && error.stack)
     process.stderr.write(`${redact(error.stack)}\n`);
-}
-
-export function redact(value: string): string {
-  return makeRedactor()(value);
-}
-
-function makeRedactor(): (value: string) => string {
-  const secrets = Object.entries(process.env)
-    .filter(
-      ([name, secret]) =>
-        secret &&
-        secret.length >= 8 &&
-        /TOKEN|SECRET|PASSWORD|AUTH_URL|JWT|PRIVATE_KEY/i.test(name),
-    )
-    .map(([, secret]) => secret!);
-  return (value) => {
-    let safe = value
-      .replace(/(https?:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, "$1[REDACTED]@")
-      .replace(/force:\/\/[^\s]+/gi, "[REDACTED Salesforce authorization URL]");
-    for (const secret of secrets) safe = safe.replaceAll(secret, "[REDACTED]");
-    return safe;
-  };
 }
 
 function redactResult(

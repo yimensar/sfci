@@ -1,11 +1,48 @@
-{ lib, buildNpmPackage, nodejs_22, gitMinimal, makeWrapper }:
+{ lib, stdenv, buildNpmPackage, nodejs_22, gitMinimal, makeWrapper }:
 
 let
   manifest = builtins.fromJSON (builtins.readFile ../package.json);
-in buildNpmPackage {
+
+  # Only the lockfile and package metadata affect this large output. An sfci
+  # source change rebuilds the small application, keeping dependency layers.
+  dependencies = buildNpmPackage {
+    pname = "sfci-dependencies";
+    version = "1";
+    nodejs = nodejs_22;
+    src = lib.fileset.toSource {
+      root = ../.;
+      fileset = lib.fileset.unions [ ../package.json ../package-lock.json ];
+    };
+    npmDepsHash = "sha256-yBjuFP9G6oqoRyLgXQHV+ASAz5wvZjG9iOb6JmlfVTc=";
+    outputs = [ "out" "development" ];
+    dontNpmBuild = true;
+    installPhase = ''
+      runHook preInstall
+      mkdir -p "$development" "$out"
+      cp -r node_modules "$development/node_modules"
+
+      # SGD's published shrinkwrap also installs its development tools.
+      npm prune --prefix node_modules/sfdx-git-delta \
+        --omit=dev --ignore-scripts --offline --no-audit --no-fund
+      npm prune --omit=dev --ignore-scripts --offline --no-audit --no-fund
+      cp -r node_modules "$out/node_modules"
+      runHook postInstall
+    '';
+    postFixup = ''
+      # These optional native-build helpers are not part of sfci execution.
+      # Avoid retaining build Python and its compiler through patched shebangs.
+      node_gyp="$out/node_modules/npm/node_modules/node-gyp"
+      if [ -d "$node_gyp" ]; then
+        while IFS= read -r -d $'\0' helper; do
+          substituteInPlace "$helper" \
+            --replace-quiet '${nodejs_22.python}/bin/python3' '/usr/bin/env python3'
+        done < <(find "$node_gyp" -type f -name '*.py' -print0)
+      fi
+    '';
+  };
+in stdenv.mkDerivation {
   pname = "sfci";
   version = manifest.version;
-  nodejs = nodejs_22;
 
   src = lib.cleanSourceWith {
     src = ../.;
@@ -16,55 +53,43 @@ in buildNpmPackage {
         && lib.cleanSourceFilter path type;
   };
 
-  # Updated only when package-lock.json changes. See docs/nix.md.
-  npmDepsHash = "sha256-45k5dhW0a3bvHFxyGXg3QOxXILXZXtq4KZKKi6gJjWI=";
-  npmPackFlags = [ "--ignore-scripts" ];
-  nativeBuildInputs = [ gitMinimal makeWrapper ];
-
-  preBuild = ''
+  nativeBuildInputs = [ nodejs_22 gitMinimal makeWrapper ];
+  dontStrip = true;
+  buildPhase = ''
+    runHook preBuild
+    export HOME="$TMPDIR/sfci-home"
+    mkdir -p "$HOME"
+    ln -s ${dependencies.development}/node_modules node_modules
     npm run typecheck
+    npm run build
+    runHook postBuild
   '';
-
   doCheck = true;
   checkPhase = ''
     runHook preCheck
     npm test
     runHook postCheck
   '';
+  installPhase = ''
+    runHook preInstall
+    package_out="$out/lib/node_modules/${manifest.name}"
+    mkdir -p "$package_out" "$out/bin"
+    cp -r bin dist package.json LICENSE THIRD_PARTY_NOTICES.md README.md "$package_out/"
+    ln -s ${dependencies}/node_modules "$package_out/node_modules"
 
-  # SGD 6.45.1's published shrinkwrap brings its development tools along.
-  # Prune that nested package before the normal root production-only prune.
-  preInstall = ''
-    npm prune --prefix node_modules/sfdx-git-delta \
-      --omit=dev --ignore-scripts --offline --no-audit --no-fund
-  '';
-
-  postInstall = ''
-    wrapProgram "$out/bin/sfci" \
+    makeWrapper ${nodejs_22}/bin/node "$out/bin/sfci" \
+      --add-flags "$package_out/bin/sfci.js" \
       --prefix PATH : ${lib.makeBinPath [ gitMinimal ]}
-
     makeWrapper ${nodejs_22}/bin/node "$out/bin/sf" \
-      --add-flags "$out/lib/node_modules/${manifest.name}/node_modules/@salesforce/cli/bin/run.js" \
+      --add-flags "${dependencies}/node_modules/@salesforce/cli/bin/run.js" \
       --set SF_AUTOUPDATE_DISABLE true \
       --set SF_DISABLE_TELEMETRY true \
       --run 'export SF_DATA_DIR="$HOME/.cache/sfci/salesforce-${manifest.dependencies."@salesforce/cli"}"' \
       --prefix PATH : ${lib.makeBinPath [ gitMinimal ]}
+    runHook postInstall
   '';
 
-  postFixup = ''
-    # npm includes node-gyp for optional future native-module builds. Those
-    # helpers are not used by sfci, and binding their shebangs to build Python
-    # would accidentally retain Python and its compiler in the runtime closure.
-    # Keep their upstream env-based interpreter choice instead.
-    node_gyp="$out/lib/node_modules/${manifest.name}/node_modules/npm/node_modules/node-gyp"
-    if [ -d "$node_gyp" ]; then
-      while IFS= read -r -d $'\0' helper; do
-        substituteInPlace "$helper" \
-          --replace-quiet '${nodejs_22.python}/bin/python3' '/usr/bin/env python3'
-      done < <(find "$node_gyp" -type f -name '*.py' -print0)
-    fi
-  '';
-
+  passthru = { inherit dependencies; };
   meta = {
     description = manifest.description;
     homepage = "https://github.com/yimensar/sfci";

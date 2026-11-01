@@ -24,6 +24,7 @@ interface PlanOptions extends TargetOptions {
 }
 interface CheckOptions extends PlanOptions {
   plan?: string;
+  refresh: boolean;
 }
 interface DeployOptions extends TargetOptions {
   ref: string;
@@ -32,7 +33,7 @@ interface DeployOptions extends TargetOptions {
   release?: string;
   yes: boolean;
   allowDestructive: boolean;
-  push: boolean;
+  push?: boolean;
 }
 
 const program = new Command()
@@ -141,6 +142,11 @@ const checkCommand = program
   );
 addPlanOptions(checkCommand)
   .option("--plan <path>", "validate an existing plan instead of preparing one")
+  .option(
+    "--refresh",
+    "run Salesforce validation again instead of reusing its result",
+    false,
+  )
   .action(async (options: CheckOptions) => {
     const ctx = context();
     const core = await import("./core/index.js");
@@ -158,6 +164,7 @@ addPlanOptions(checkCommand)
           cwd: ctx.cwd,
           planPath: plan.path,
           target: options.target,
+          refresh: options.refresh,
         }),
     );
     output("check", { plan, validation }, ctx.output);
@@ -183,7 +190,11 @@ program
     "explicitly permit planned metadata deletions",
     false,
   )
-  .option("--push", "push the successful receipt tag to origin", false)
+  .option(
+    "--push",
+    "publish coordination and receipts to origin (default with origin)",
+  )
+  .option("--no-push", "keep receipts local for isolated use")
   .action(async (options: DeployOptions) => {
     const ctx = context();
     if (options.plan && options.release)
@@ -206,7 +217,7 @@ program
             planPath: plan.path,
             target: options.target,
             allowDestructive: options.allowDestructive,
-            push: options.push,
+            ...(options.push !== undefined ? { push: options.push } : {}),
           }),
       );
       output("deploy", receipt, ctx.output);
@@ -229,7 +240,7 @@ program
               ? { releasePath: resolve(ctx.cwd, options.release) }
               : {}),
             allowDestructive: options.allowDestructive,
-            push: options.push,
+            ...(options.push !== undefined ? { push: options.push } : {}),
           }),
       );
       output("deploy", receipt, ctx.output);
@@ -273,8 +284,12 @@ program
   )
   .requiredOption("--target <environment>", "configured environment")
   .option("-y, --yes", "confirm reconciliation without prompting", false)
-  .option("--push", "push the confirmed successful receipt to origin", false)
-  .action(async (options: TargetOptions & { yes: boolean; push: boolean }) => {
+  .option(
+    "--push",
+    "publish coordination and receipts to origin (default with origin)",
+  )
+  .option("--no-push", "keep receipts local for isolated use")
+  .action(async (options: TargetOptions & { yes: boolean; push?: boolean }) => {
     const ctx = context();
     await confirmAction(
       `Reconcile the pending operation for ${options.target}?`,
@@ -285,7 +300,11 @@ program
     output(
       "resume",
       await withProgress("Reconciling Salesforce operation", ctx.output, () =>
-        resume({ cwd: ctx.cwd, target: options.target, push: options.push }),
+        resume({
+          cwd: ctx.cwd,
+          target: options.target,
+          ...(options.push !== undefined ? { push: options.push } : {}),
+        }),
       ),
       ctx.output,
     );
@@ -301,10 +320,14 @@ program
   .requiredOption("--target <environment>", "configured environment")
   .requiredOption("--commit <commit>", "commit known to match the target org")
   .option("-y, --yes", "confirm the verified baseline without prompting", false)
-  .option("--push", "push the baseline receipt tag to origin", false)
+  .option(
+    "--push",
+    "publish coordination and receipts to origin (default with origin)",
+  )
+  .option("--no-push", "keep receipts local for isolated use")
   .action(
     async (
-      options: TargetOptions & { commit: string; yes: boolean; push: boolean },
+      options: TargetOptions & { commit: string; yes: boolean; push?: boolean },
     ) => {
       const ctx = context();
       await confirmAction(
@@ -320,7 +343,7 @@ program
             cwd: ctx.cwd,
             target: options.target,
             commit: options.commit,
-            push: options.push,
+            ...(options.push !== undefined ? { push: options.push } : {}),
           }),
         ),
         ctx.output,

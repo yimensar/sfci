@@ -10,6 +10,13 @@ Known inherited dependency audit findings are recorded in [the alpha dependency 
 
 ## Start
 
+Install the complete runtime with Nix:
+
+```sh
+nix profile add github:yimensar/sfci/v0.1.0-alpha.2
+sfci init
+```
+
 From the source repository:
 
 ```sh
@@ -87,10 +94,12 @@ Commit the setup files before preparing a plan. Configure required PR checks and
 | `sfci deploy --target uat --push` | Deploy the selected trunk version and publish its successful receipt. |
 | `sfci release --from uat --output .sfci/release.json` | Freeze the last successful sfci deployment from UAT. |
 | `sfci deploy --target production --release .sfci/release.json --push` | Validate and deploy that exact version using the production baseline. |
-| `sfci status` | Show recorded baselines and local operations needing attention. |
+| `sfci status` | Show baselines and unfinished operations recorded locally or on origin. |
 | `sfci resume --target uat --push` | Reconcile a preserved deployment operation without submitting it again. |
 
 Use `--yes` to confirm mutations in CI, `--json` for a structured result, and `--verbose` for diagnostics. Metadata deletion requires a separate `--allow-destructive` flag. `--mode full` deploys the configured source directories while retaining explicit Git-derived deletions; it does not purge unknown org metadata.
+
+With an `origin`, mutations coordinate and publish receipts there by default; `--push` makes this explicit. Use `--no-push` only for isolated local operation. All runners delivering to an org must share one coordinator and origin.
 
 Plans live under `.sfci/plans/<id>/`. Each plan contains its own committed source snapshot, manifests, org identity, configuration fingerprint, and file hashes. Keep the **whole directory**, not just `plan.json`, when moving it between CI steps.
 
@@ -103,6 +112,8 @@ sfci deploy --target uat --plan .sfci/plans/<id>/plan.json --push
 
 The production path uses a successful production validation followed by Salesforce Quick Deploy. A UAT validation is never reused for production. Tests default to `RunLocalTests`; `NoTestRun` is rejected for actual production orgs.
 
+`sfci check --target production --plan <path> --refresh` reruns validation after an external deployment or package installation. The cached result is bound to the plan and expires conservatively after nine days; Salesforce determines actual Quick Deploy eligibility.
+
 ## What is recorded
 
 Annotated tags under `sfci/<environment>/` contain structured deployment receipts: org ID, source commit, predecessor, sequence, plan ID, Salesforce job ID, and completion time. Tags are created only after confirmed success. Receipt order uses a sequence rather than the timestamp of an arbitrary Git tag; conflicting sequences stop the operation.
@@ -111,13 +122,15 @@ For example, if UAT is on A and deployment B fails, the next plan for C starts a
 
 ## Recovery and operating limits
 
-- Serialize Salesforce checks and deployments for the same org in your CI. The generated templates do this. The local lock does not coordinate separate checkouts, repositories, or deployments made outside sfci.
-- Keep `.sfci/operations/` and its referenced plan directory as protected CI artifacts, including on failure. Operation state is local to the workspace; a fresh runner cannot discover another runner's lost state automatically.
-- After a pipeline interruption, inspect Salesforce Deployment Status and restore its operation artifacts before retrying. `resume` can finish polling a known job or retry publishing a receipt after Salesforce succeeded. An ambiguous submission without a returned job ID requires operator reconciliation.
+- Serialize Salesforce checks and deployments for the same org in your CI. With publication enabled, an atomic Git checkpoint under `sfci-pending/<org-id>` blocks another cooperating runner before metadata submission. Setup changes, other repositories, and other deployment tools remain outside this coordination.
+- Keep `.sfci/operations/` and its exact plan directory as protected CI artifacts, including on failure. Fresh runners discover the pending checkpoint on origin, but still need the immutable plan to resume. The GitHub template restores artifacts from an explicitly selected run; it never guesses the latest artifact.
+- After a pipeline interruption, use `status`, restore the original plan, and `resume`. A lost artifact or submission without a confirmed job ID requires operator reconciliation. A baseline-publication checkpoint without an operation also requires verifying the receipt and org before clearing it. Do not remove a checkpoint merely to unblock another deployment.
 - A receipt describes the last deployment known to sfci. It does not detect manual changes in an org. Reconcile those changes, or a sandbox refresh, before resetting a verified baseline.
 - Automatic metadata dependency discovery is limited to Git Delta's behavior. A successful delta validation does not prove every external dependency or future full deployment will work.
 - Source snapshots currently reject symbolic links, submodules and Git LFS pointers. Deployments do not run Apex/data migrations, activate feature flags, or promise automatic rollback.
 - The first image targets Linux x86-64. Nix development and CLI builds support Apple Silicon macOS and the declared Linux platforms; image builds run on Linux.
+
+Read the [Salesforce trunk-based delivery guide](docs/trunk-based.md) for metadata dependencies, profiles, feature flags, schema evolution, squash merges, and org refreshes. Use the [dedicated-sandbox acceptance recipe](docs/acceptance.md) to qualify the workflow on your project before production.
 
 ## Develop
 

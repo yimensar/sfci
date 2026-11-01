@@ -3,8 +3,9 @@ interface PipelineOptions {
   uat: string;
   production: string;
 }
-const image = "ghcr.io/yimensar/sfci:0.1.0-alpha.1";
-const authSecret = "$" + "{{ secrets.SF_AUTH_URL }}";
+const image = "ghcr.io/yimensar/sfci:0.1.0-alpha.2";
+const expression = (value: string): string => "$" + "{{ " + value + " }}";
+const authSecret = expression("secrets.SF_AUTH_URL");
 const shellQuote = (value: string): string =>
   `'${value.replaceAll("'", "'\\''")}'`;
 
@@ -15,6 +16,11 @@ export function bitbucketPipeline({
 }: PipelineOptions): string {
   return `# Set SF_AUTH_URL separately in the uat and production deployment environments.
 # Initialize and push the baseline receipts before the first run.
+# Use one deployment coordinator per org. The same concurrency group must cover
+# every pipeline that writes to that org; never cancel an active deployment.
+# After an interrupted step, restore its exact .sfci artifact before running
+# sfci resume --target <environment> --yes --push. Recovery guide:
+# https://github.com/yimensar/sfci/blob/main/docs/trunk-based.md
 image: ${image}
 clone:
   depth: full
@@ -42,7 +48,11 @@ pipelines:
             - printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias ${uat} --sfdx-url-stdin
             - sfci deploy --target uat --yes --push
           artifacts:
-            - .sfci/**
+            - name: sfci-uat
+              paths:
+                - .sfci/plans/**
+                - .sfci/operations/**
+              capture-on: always
   custom:
     promote-production:
       - step:
@@ -63,7 +73,11 @@ pipelines:
             - printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias ${production} --sfdx-url-stdin
             - sfci deploy --target production --release .sfci/release.json --yes --push
           artifacts:
-            - .sfci/**
+            - name: sfci-production
+              paths:
+                - .sfci/plans/**
+                - .sfci/operations/**
+              capture-on: always
 `;
 }
 
@@ -75,6 +89,9 @@ export function githubWorkflow({
   return `# Set SF_AUTH_URL in GitHub environments named uat and production.
 # Configure required reviewers on production if approval is required.
 # Initialize and push baseline receipts before the first run.
+# Use one deployment coordinator per org, with the same concurrency group for
+# all jobs that write to it. Do not cancel active deployments.
+# For recovery, dispatch with the exact failed run ID, before another delivery.
 name: Salesforce delivery
 on:
   pull_request:
@@ -82,6 +99,16 @@ on:
   push:
     branches: [${JSON.stringify(trunk)}]
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Deploy trunk to UAT, promote its release, or recover an interrupted deployment
+        type: choice
+        options: [promote, deploy-uat, recover-uat, recover-production]
+        default: promote
+      recovery_run:
+        description: Exact workflow run ID containing the interrupted deployment artifact
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -111,7 +138,7 @@ jobs:
           path: .sfci/plans/
           include-hidden-files: true
   deploy-uat:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy-uat')
     runs-on: ubuntu-latest
     container: ${image}
     environment: uat
@@ -133,10 +160,14 @@ jobs:
         if: always()
         with:
           name: sfci-uat
-          path: .sfci/
+          path: |
+            .sfci/plans/
+            .sfci/operations/
           include-hidden-files: true
+          overwrite: true
+          retention-days: 30
   freeze:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.operation == 'promote'
     runs-on: ubuntu-latest
     container: ${image}
     environment: uat
@@ -184,7 +215,57 @@ jobs:
         if: always()
         with:
           name: sfci-production
-          path: .sfci/
+          path: |
+            .sfci/plans/
+            .sfci/operations/
           include-hidden-files: true
+          overwrite: true
+          retention-days: 30
+  recover:
+    if: github.event_name == 'workflow_dispatch' && startsWith(inputs.operation, 'recover-')
+    runs-on: ubuntu-latest
+    container: ${image}
+    environment: ${expression("inputs.operation == 'recover-uat' && 'uat' || 'production'")}
+    permissions:
+      contents: write
+      actions: read
+    concurrency:
+      group: ${expression("inputs.operation == 'recover-uat' && 'sfci-uat' || 'sfci-production'")}
+      cancel-in-progress: false
+    env:
+      TARGET: ${expression("inputs.operation == 'recover-uat' && 'uat' || 'production'")}
+      ORG_ALIAS: ${expression(`inputs.operation == 'recover-uat' && '${uat}' || '${production}'`)}
+      RECOVERY_RUN: ${expression("inputs.recovery_run")}
+    steps:
+      - name: Require an exact interrupted run
+        run: |
+          case "$RECOVERY_RUN" in
+            ''|*[!0-9]*) echo 'Set recovery_run to the exact interrupted workflow run ID.' >&2; exit 1 ;;
+          esac
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore that deployment checkpoint
+        uses: actions/download-artifact@v4
+        with:
+          name: sfci-${expression("env.TARGET")}
+          path: .sfci
+          run-id: ${expression("inputs.recovery_run")}
+          github-token: ${expression("secrets.GITHUB_TOKEN")}
+      - name: Authenticate target
+        env:
+          SF_AUTH_URL: ${authSecret}
+        run: printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias "$ORG_ALIAS" --sfdx-url-stdin
+      - run: sfci resume --target "$TARGET" --yes --push
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sfci-${expression("env.TARGET")}
+          path: |
+            .sfci/plans/
+            .sfci/operations/
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 30
 `;
 }

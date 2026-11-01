@@ -21,3 +21,10 @@ was 1,886,111,848 bytes. This is packaging cleanup, not faster Salesforce tests.
 Run `npm run build && node scripts/benchmark.mjs` to repeat the CLI startup
 measurement. Salesforce validation time, image pull time, repository size and
 Git Delta planning time need separate measurements in a real project.
+
+The Nix package now keeps production dependencies in a separate derivation
+whose inputs are the package metadata and lockfile. The application contains
+its own JavaScript and a link to those modules. This allows source-only changes
+to reuse the dependency store path and image layer. The size measurements above
+predate this split; they are not new image or transfer benchmarks. See
+[the reuse check](nix.md#check-dependency-reuse) to verify the package boundary.

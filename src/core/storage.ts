@@ -10,7 +10,7 @@ export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (typeof value === "object" && value !== null)
     return `{${Object.entries(value)
-      .sort(([a], [b]) => a.localeCompare(b))
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([key, entry]) => `${JSON.stringify(key)}:${canonical(entry)}`)
       .join(",")}}`;
   return JSON.stringify(value);
@@ -49,9 +49,10 @@ export async function refresh(cwd: string, trunk: string): Promise<void> {
     await git(
       cwd,
       "fetch",
+      "--no-tags",
       "origin",
-      "--tags",
       `+refs/heads/${trunk}:refs/remotes/origin/${trunk}`,
+      "refs/tags/sfci/*:refs/tags/sfci/*",
     );
 }
 export async function clean(cwd: string): Promise<void> {
@@ -72,24 +73,20 @@ export async function receipts(
   cwd: string,
   target: string,
 ): Promise<Receipt[]> {
-  const tags = (
+  // Read annotated receipts and their target objects in one Git process.
+  const entries = (
     await git(
       cwd,
       "for-each-ref",
-      "--format=%(refname:short)",
+      "--format=%(refname:short)%00%(*objectname)%00%(contents)%00",
       `refs/tags/sfci/${target}/`,
     )
-  )
-    .split("\n")
-    .filter(Boolean);
+  ).split("\0");
   const receipts: Receipt[] = [];
-  for (const tag of tags) {
-    const contents = await git(
-      cwd,
-      "for-each-ref",
-      "--format=%(contents)",
-      `refs/tags/${tag}`,
-    );
+  for (let index = 0; index + 2 < entries.length; index += 3) {
+    const tag = entries[index]!.trim();
+    const targetCommit = entries[index + 1]!;
+    const contents = entries[index + 2]!;
     let receipt: Receipt;
     try {
       receipt = JSON.parse(contents) as Receipt;
@@ -111,7 +108,7 @@ export async function receipts(
       !Number.isSafeInteger(receipt.sequence) ||
       receipt.sequence < 1 ||
       !Number.isFinite(Date.parse(receipt.completedAt)) ||
-      receipt.commit !== (await commit(cwd, tag))
+      receipt.commit !== targetCommit
     ) {
       throw new SfciError(
         `Deployment receipt ${tag} is inconsistent.`,
@@ -186,14 +183,21 @@ export async function writeReceipt(
       JSON.stringify(receipt),
     );
   }
-  if (push) await git(cwd, "push", "origin", `refs/tags/${receipt.tag}`);
+  if (push)
+    await git(
+      cwd,
+      "push",
+      "--no-follow-tags",
+      "origin",
+      `refs/tags/${receipt.tag}`,
+    );
 }
 export async function locked<T>(
   cwd: string,
   orgId: string,
   task: () => Promise<T>,
 ): Promise<T> {
-  const path = resolve(cwd, ".sfci", "locks", orgId);
+  const path = resolve(cwd, ".sfci", "locks", orgId.slice(0, 15));
   await mkdir(resolve(path, ".."), { recursive: true });
   try {
     await mkdir(path);
