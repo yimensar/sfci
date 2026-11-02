@@ -3,7 +3,7 @@ import type { Config } from "../core/types.js";
 
 const serialize = (value: unknown): string =>
   stringify(value, { lineWidth: 0, aliasDuplicateObjects: false });
-const image = "ghcr.io/yimensar/sfci:0.1.0-alpha.4";
+const image = "ghcr.io/yimensar/sfci:0.1.0-alpha.5";
 const expression = (value: string): string => "$" + "{{ " + value + " }}";
 const shellQuote = (value: string): string =>
   `'${value.replaceAll("'", "'\\''")}'`;

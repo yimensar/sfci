@@ -18,7 +18,7 @@ export interface AuthOptions extends TargetOptions {
 export async function authenticate(
   options: AuthOptions,
   environment: NodeJS.ProcessEnv = process.env,
-): Promise<{ target: string; org: string; method: "jwt" }> {
+): Promise<{ target: string; org: string; method: "jwt"; keyFile: string }> {
   const config = await readConfig(options.cwd);
   const target = config.environments[options.target];
   if (!target)
@@ -49,6 +49,7 @@ export async function authenticate(
         ),
       );
   const directory = key ? await mkdtemp(resolve(tmpdir(), "sfci-jwt-")) : null;
+  let authenticated = false;
   try {
     const path = providedFile
       ? resolve(options.cwd, providedFile)
@@ -88,10 +89,14 @@ export async function authenticate(
         );
       throw error;
     }
+    // Salesforce stores this path and rereads the key to renew expired sessions.
+    // Keep successful CI-session keys until the ephemeral runner is destroyed.
+    authenticated = true;
     // Salesforce's response includes an access token. Never return or print it.
-    return { target: options.target, org: target.org, method: "jwt" };
+    return { target: options.target, org: target.org, method: "jwt", keyFile: path };
   } finally {
-    if (directory) await rm(directory, { recursive: true, force: true });
+    if (directory && !authenticated)
+      await rm(directory, { recursive: true, force: true });
   }
 }
 

@@ -1,8 +1,10 @@
 # Trunk-based Salesforce delivery
 
 `main` is the integration line. Short-lived branches use ordinary Git commits;
-the CI validates a merge candidate, deploys the current trunk to UAT, then promotes
-a frozen commit already delivered to UAT. Salesforce orgs remain mutable systems,
+the CI validates a merge candidate and deploys the current trunk to your configured
+root sandbox. Optional promotion stages receive a frozen commit already delivered
+to their source environment. Names and paths are project choices; examples below
+use UAT and Production. A direct production root uses a manually started pipeline. Salesforce orgs remain mutable systems,
 so Git history alone cannot establish their current contents.
 
 ## The delivery contract
@@ -54,8 +56,9 @@ Use expand–migrate–contract for structural changes:
 Flags do not hide schema changes or make destructive migrations reversible.
 Permission-set assignments are separate user records, not simply the permission
 set definition. Custom metadata records may be deployable metadata; ordinary
-business/reference data still needs its own migration process. sfci currently
-does not run migrations, assign users, or activate flags. [PermissionSetAssignment
+business/reference data still needs its own migration process. sfci delivery currently
+does not run migrations, assign business permissions, or activate flags. The
+separate auth bootstrap only assigns its dedicated app-access permission set. [PermissionSetAssignment
 reference](https://developer.salesforce.com/docs/platform/field-reference/references/field-reference/salesforce-field-reference-permissionsetassignment.html)
 
 ## Keep failures recoverable

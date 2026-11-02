@@ -101,6 +101,9 @@ export function output(
     process.stdout.write(
       `Authenticated ${String(value.target)} (${String(value.org)}) using JWT.\n`,
     );
+    process.stdout.write(
+      `  Key file: ${String(value.keyFile)} (required for session renewal).\n`,
+    );
   } else if (command === "init") {
     process.stdout.write("sfci is ready.\n");
     for (const file of asArray(value.files))

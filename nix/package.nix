@@ -13,7 +13,7 @@ let
       root = ../.;
       fileset = lib.fileset.unions [ ../package.json ../package-lock.json ];
     };
-    npmDepsHash = "sha256-vCODNj0vTFfTi8BopedZ+mqlxMlqIo1qV/V4EYXVzlc=";
+    npmDepsHash = "sha256-p6fTL3uNJplTp4td29gqCmnbskQznipgJIEKbDE/t08=";
     outputs = [ "out" "development" ];
     dontNpmBuild = true;
     installPhase = ''

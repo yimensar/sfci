@@ -116,7 +116,15 @@ values for transfer to your secured environment settings. Bootstrap does not wri
 to Bitbucket or create its environments. Keys for different orgs stay separate.
 The generated pipeline calls `sfci auth --target <name>` with its environment's
 variables. `--jwt-key-file` / `SF_JWT_KEY_FILE` also support a caller-owned key file.
-Existing local Salesforce CLI authenticated aliases remain reusable.
+Salesforce CLI stores the key path and rereads it to renew an expired session.
+A decoded base64 key is retained in a private temporary directory after successful
+login; the command returns its path, never its contents. Keep it for the entire CI
+job, then let the ephemeral runner remove it. Self-hosted runners must explicitly
+remove that generated file/directory after their final Salesforce command.
+Failed authentication removes its
+temporary key. Locally, prefer a stable caller-owned key file, since operating
+system cleanup can remove temporary files. Existing authenticated aliases remain
+reusable while their backing credentials are available.
 
 Keep Bitbucket's preconfigured HTTP Git origin when it supplies the required
 write access. Receipt and checkpoint publication requires creating `sfci/*` tags

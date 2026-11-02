@@ -13,7 +13,7 @@ Known inherited dependency audit findings are recorded in [the alpha dependency 
 Install the complete runtime with Nix:
 
 ```sh
-nix profile add github:yimensar/sfci/v0.1.0-alpha.4
+nix profile add github:yimensar/sfci/v0.1.0-alpha.5
 sfci init
 ```
 
@@ -81,7 +81,7 @@ CI authentication uses JWT exclusively, through the bundled Salesforce CLI. Set 
 | `SF_INSTANCE_URL` | HTTPS Salesforce login or My Domain URL. |
 | `SF_JWT_KEY_B64` | Base64-encoded RSA private key, stored as a secured variable. |
 
-The Salesforce application must trust the corresponding certificate and authorize the integration user. The experimental `sfci auth bootstrap` command can create these resources from an existing administrator connection. sfci calls `sf org login jwt`; it does not implement JWT signing or token storage. It writes the decoded key to a private temporary file, removes it after the authentication attempt, and never prints the access token returned by Salesforce. See the [Bitbucket and JWT setup guide](docs/bitbucket-jwt.md).
+The Salesforce application must trust the corresponding certificate and authorize the integration user. The experimental `sfci auth bootstrap` command can create these resources from an existing administrator connection. sfci calls `sf org login jwt`; it does not implement JWT signing or token storage. It writes the decoded key to a private file and retains it after successful login so Salesforce CLI can renew expired sessions. Failed attempts remove that file. Successful CI-session files disappear with the ephemeral runner; locally, prefer a caller-owned key file. It never prints the access token returned by Salesforce. See the [Bitbucket and JWT setup guide](docs/bitbucket-jwt.md).
 
 ```sh
 sfci auth --target preprod

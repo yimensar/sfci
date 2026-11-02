@@ -15,7 +15,7 @@ The principal runtime dependencies are:
 | `fflate` | MIT |
 | `yaml` | ISC |
 
-The Nix image additionally includes Node.js, Git, OpenSSH and small system tools.
+The Nix image additionally includes Node.js, Git, OpenSSH, OpenSSL and small system tools.
 Their license and copyright notices are supplied by their respective packages.
 The root `LICENSE` covers sfci only and does not relicense these dependencies.
 

@@ -22,7 +22,7 @@ npm run dev -- --help
 npm run check
 ```
 
-The shell supplies Node and Git and adds local npm executables to `PATH`.
+The shell supplies Node, Git and OpenSSL and adds local npm executables to `PATH`.
 Dependencies are installed into the checkout only for development. Their exact
 versions come from the lockfile. `nix build` uses an offline npm cache instead.
 
@@ -51,7 +51,7 @@ On Linux, or with a configured Linux builder:
 ```sh
 nix build .#image
 docker load --input result
-docker run --rm ghcr.io/yimensar/sfci:0.1.0-alpha.4 sfci --help
+docker run --rm ghcr.io/yimensar/sfci:0.1.0-alpha.5 sfci --help
 ```
 
 The image is built by `dockerTools.buildLayeredImage`; constructing it does not
@@ -81,7 +81,7 @@ For an interactive checkout, mount it and preserve the runner's user identity:
 docker run --rm -it \
   --user 1000:1000 \
   --volume "$PWD:/workspace" \
-  ghcr.io/yimensar/sfci:0.1.0-alpha.4 sfci status
+  ghcr.io/yimensar/sfci:0.1.0-alpha.5 sfci status
 ```
 
 CI services can run the image with their usual user and credentials mechanism.

@@ -30,7 +30,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   return cwd;
 }
 
-test("JWT auth delegates to Salesforce, restricts and removes its temporary key, and returns no token", async (t) => {
+test("JWT auth delegates to Salesforce and keeps its private key available for session renewal without returning a token", async (t) => {
   const cwd = await fixture(t);
   let keyPath = "";
   const runtime: Runtime = {
@@ -58,8 +58,11 @@ test("JWT auth delegates to Salesforce, restricts and removes its temporary key,
     { cwd, target: "uat", runtime },
     credentials,
   );
-  assert.deepEqual(result, { target: "uat", org: "partial", method: "jwt" });
-  await assert.rejects(stat(dirname(keyPath)), { code: "ENOENT" });
+  t.after(() => rm(dirname(keyPath), { recursive: true, force: true }));
+  assert.deepEqual(result, { target: "uat", org: "partial", method: "jwt", keyFile: keyPath });
+  // Salesforce's refreshFn rereads this path after the login command has exited.
+  assert.equal(await readFile(result.keyFile, "utf8"), pem);
+  assert.doesNotMatch(JSON.stringify(result), /MUST_NOT_LEAVE|NEVER_RETURN|PRIVATE KEY/);
 });
 
 test("JWT private key is removed when Salesforce rejects authentication", async (t) => {
@@ -159,8 +162,9 @@ test("existing SFDX_CLIENT_ID variables remain usable for Bitbucket migrations",
       return {};
     },
   };
-  await authenticate(
+  const result = await authenticate(
     { cwd, target: "uat", runtime },
     { ...rest, SFDX_CLIENT_ID: id },
   );
+  t.after(() => rm(dirname(result.keyFile), { recursive: true, force: true }));
 });

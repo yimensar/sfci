@@ -71,7 +71,7 @@ test("help and version work without a Salesforce project or connection", () => {
   assert.equal(help.stderr, "");
   const version = run(["--version"], tmpdir());
   assert.equal(version.status, 0);
-  assert.match(version.stdout, /^0\.1\.0-alpha\.4\n$/);
+  assert.match(version.stdout, /^0\.1\.0-alpha\.5\n$/);
 });
 
 test("usage errors are one structured JSON result without terminal formatting", () => {
@@ -151,7 +151,7 @@ test("init creates a working configuration and GitHub workflow", async () => {
     join(root, ".github/workflows/sfci.yml"),
     "utf8",
   );
-  assert.match(pipeline, /ghcr\.io\/yimensar\/sfci:0\.1\.0-alpha\.4/);
+  assert.match(pipeline, /ghcr\.io\/yimensar\/sfci:0\.1\.0-alpha\.5/);
   assert.match(pipeline, /head\.repo\.full_name == github\.repository/);
   assert.doesNotMatch(pipeline, /pull_request_target/);
   assert.match(pipeline, /\$\{\{ secrets\.SF_JWT_KEY_B64 \}\}/);
