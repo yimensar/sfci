@@ -15,7 +15,7 @@ import { TOOLCHAIN } from "../toolchain.js";
 import { ComponentSet } from "@salesforce/source-deploy-retrieve";
 import { readConfig } from "./config.js";
 import { execute, git } from "./process.js";
-import { assertTests, identify } from "./salesforce.js";
+import { assertOrgType, assertTests, identify } from "./salesforce.js";
 import {
   canonical,
   clean,
@@ -199,6 +199,7 @@ export async function assertCurrent(
       "STALE_PLAN",
     );
   const org = await identify(options, plan.org);
+  assertOrgType(target, org);
   if (org.orgId !== plan.orgId || org.production !== plan.production)
     throw new SfciError(
       "The org behind this alias changed.",
@@ -268,6 +269,7 @@ export async function createPlan(
     );
   }
   const org = await identify({ ...options, cwd }, env.org);
+  assertOrgType(env, org);
   if (org.orgId !== base.orgId)
     throw new SfciError(
       "The org no longer matches its baseline.",

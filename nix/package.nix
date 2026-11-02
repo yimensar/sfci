@@ -1,4 +1,4 @@
-{ lib, stdenv, buildNpmPackage, nodejs_22, gitMinimal, makeWrapper }:
+{ lib, stdenv, buildNpmPackage, nodejs_22, gitMinimal, openssl, makeWrapper }:
 
 let
   manifest = builtins.fromJSON (builtins.readFile ../package.json);
@@ -13,7 +13,7 @@ let
       root = ../.;
       fileset = lib.fileset.unions [ ../package.json ../package-lock.json ];
     };
-    npmDepsHash = "sha256-H1JHISMD7rdyTZG6k9vLmqRWpNg18I+r7kxuMz083z8=";
+    npmDepsHash = "sha256-vCODNj0vTFfTi8BopedZ+mqlxMlqIo1qV/V4EYXVzlc=";
     outputs = [ "out" "development" ];
     dontNpmBuild = true;
     installPhase = ''
@@ -53,7 +53,7 @@ in stdenv.mkDerivation {
         && lib.cleanSourceFilter path type;
   };
 
-  nativeBuildInputs = [ nodejs_22 gitMinimal makeWrapper ];
+  nativeBuildInputs = [ nodejs_22 gitMinimal makeWrapper openssl ];
   dontStrip = true;
   buildPhase = ''
     runHook preBuild
@@ -79,13 +79,13 @@ in stdenv.mkDerivation {
 
     makeWrapper ${nodejs_22}/bin/node "$out/bin/sfci" \
       --add-flags "$package_out/bin/sfci.js" \
-      --prefix PATH : ${lib.makeBinPath [ gitMinimal ]}
+      --prefix PATH : ${lib.makeBinPath [ gitMinimal openssl ]}
     makeWrapper ${nodejs_22}/bin/node "$out/bin/sf" \
       --add-flags "${dependencies}/node_modules/@salesforce/cli/bin/run.js" \
       --set SF_AUTOUPDATE_DISABLE true \
       --set SF_DISABLE_TELEMETRY true \
       --run 'export SF_DATA_DIR="$HOME/.cache/sfci/salesforce-${manifest.dependencies."@salesforce/cli"}"' \
-      --prefix PATH : ${lib.makeBinPath [ gitMinimal ]}
+      --prefix PATH : ${lib.makeBinPath [ gitMinimal openssl ]}
     runHook postInstall
   '';
 

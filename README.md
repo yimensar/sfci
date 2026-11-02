@@ -13,7 +13,7 @@ Known inherited dependency audit findings are recorded in [the alpha dependency 
 Install the complete runtime with Nix:
 
 ```sh
-nix profile add github:yimensar/sfci/v0.1.0-alpha.3
+nix profile add github:yimensar/sfci/v0.1.0-alpha.4
 sfci init
 ```
 
@@ -49,25 +49,30 @@ sfci init
 `init` guides you through the environments and CI provider. In automation, supply the answers explicitly:
 
 ```sh
-sfci init --ci bitbucket --uat partial --production production
+sfci init --ci bitbucket \
+  --environment preprod:sandbox:partial \
+  --environment prod:production:production \
+  --promote preprod:prod
 ```
 
-It creates `sfci.yml`, ignores generated state under `.sfci/`, and writes a Bitbucket Pipelines or GitHub Actions template. Existing configurations are preserved; an existing pipeline gets a separate example to review and integrate. The logical `uat` target represents the preproduction sandbox.
+It creates `sfci.yml`, ignores generated state under `.sfci/`, and writes a Bitbucket Pipelines or GitHub Actions template. Existing configurations are preserved; an existing pipeline gets a separate example to review and integrate. Environment names and promotion links are configurable; each environment has a sandbox or production type.
 
 ```yaml
 trunk: main
 
 environments:
-  uat:
+  preprod:
+    type: sandbox
     org: partial
     tests: RunLocalTests
-  production:
+  prod:
+    type: production
     org: production
     tests: RunLocalTests
-    promoteFrom: uat
+    promoteFrom: preprod
 ```
 
-CI authentication uses JWT exclusively, through the bundled Salesforce CLI. Set these variables separately in the Bitbucket `uat` and `production` environments:
+CI authentication uses JWT exclusively, through the bundled Salesforce CLI. Set these variables separately in the Bitbucket environments with the names declared in sfci.yml:
 
 | Variable | Value |
 | --- | --- |
@@ -76,37 +81,67 @@ CI authentication uses JWT exclusively, through the bundled Salesforce CLI. Set 
 | `SF_INSTANCE_URL` | HTTPS Salesforce login or My Domain URL. |
 | `SF_JWT_KEY_B64` | Base64-encoded RSA private key, stored as a secured variable. |
 
-The Salesforce application must trust the corresponding certificate and authorize the integration user. sfci calls `sf org login jwt`; it does not implement JWT signing or token storage. It writes the decoded key to a private temporary file, removes it after the authentication attempt, and never prints the access token returned by Salesforce. See the [Bitbucket and JWT setup guide](docs/bitbucket-jwt.md).
+The Salesforce application must trust the corresponding certificate and authorize the integration user. The experimental `sfci auth bootstrap` command can create these resources from an existing administrator connection. sfci calls `sf org login jwt`; it does not implement JWT signing or token storage. It writes the decoded key to a private temporary file, removes it after the authentication attempt, and never prints the access token returned by Salesforce. See the [Bitbucket and JWT setup guide](docs/bitbucket-jwt.md).
 
 ```sh
-sfci auth --target uat
-sfci doctor --target uat
+sfci auth --target preprod
+sfci doctor --target preprod
 ```
 
-Locally, existing Salesforce CLI aliases and authenticated orgs remain usable. To connect explicitly with a key file, use `sfci auth --target uat --client-id <id> --username <user> --instance-url <url> --jwt-key-file <path>`. The same inputs can be supplied through environment variables, including `SF_JWT_KEY_FILE` instead of base64. Keep keys and Salesforce authentication directories outside Git, CI artifacts and the Nix store.
+Locally, existing Salesforce CLI aliases and authenticated orgs remain usable. To connect explicitly with a key file, use `sfci auth --target preprod --client-id <id> --username <user> --instance-url <url> --jwt-key-file <path>`. The same inputs can be supplied through environment variables, including `SF_JWT_KEY_FILE` instead of base64. Keep keys and Salesforce authentication directories outside Git, CI artifacts and the Nix store.
 
 Before the first deployment, record the Git commit known to represent **each** org:
 
 ```sh
-sfci baseline set --target uat --commit <verified-uat-commit> --push
-sfci baseline set --target production --commit <verified-production-commit> --push
+sfci baseline set --target preprod --commit <verified-preprod-commit> --push
+sfci baseline set --target prod --commit <verified-production-commit> --push
 ```
 
 A baseline is an assertion by the operator, not an automatic comparison with Salesforce. Do not choose an arbitrary commit to bypass setup. Existing `deploy/preprod/*` or `deploy/prod/*` tags can be used as the `--commit` reference after verifying their correspondence to the target org. `sfci` records its own structured receipt without rewriting the old tags.
 
 Commit the setup files before preparing a plan. Configure required PR checks and branch protections in your Git host; generating a pipeline does not configure those settings.
 
+## Bootstrap and sandbox refresh
+
+The experimental bootstrap creates an External Client App and an app-access-only
+permission set, assigns that set to an existing integration user, then verifies
+JWT authentication. It uses an existing, separate administrator connection:
+
+```sh
+sfci auth bootstrap --target preprod --admin-org preprod-admin \
+  --username ci@example.com.preprod
+```
+
+Keys and credentials are saved in a private directory outside Git. The command
+prints its path, not its contents. Transfer the generated variables to the
+matching secured Bitbucket environment. Existing API/deployment permissions of
+the integration user are required; bootstrap does not grant those rights.
+
+After refreshing a sandbox, reconnect the administrator and rerun with
+`--after-refresh`, using the same private bootstrap directory. The command
+reuses that sandbox's key and configured client ID and verifies the login.
+Salesforce may reject conflicting client credentials; the command stops on a
+server rejection rather than claiming the environment is ready. Verify/update
+the Bitbucket variables and explicitly set the baseline to the source commit
+actually copied by the refresh. Authentication never guesses that commit.
+
+This bootstrap has offline tests and official metadata resolution, but has not
+been qualified against a live org. See [Bitbucket/JWT setup](docs/bitbucket-jwt.md).
+To add an integration stage or change promotion links, edit `sfci.yml`, then run
+`sfci pipeline --ci bitbucket`; existing pipeline files remain untouched and a
+reviewable example is generated.
+
 ## Deliver
 
 | Command | Purpose |
 | --- | --- |
-| `sfci check --target uat` | Snapshot committed sources, calculate the cumulative delta, and validate it in UAT. |
-| `sfci plan --target uat` | Prepare and inspect a plan without submitting a metadata validation. |
-| `sfci deploy --target uat --push` | Deploy the selected trunk version and publish its successful receipt. |
-| `sfci release --from uat --output .sfci/release.json` | Freeze the last successful sfci deployment from UAT. |
-| `sfci deploy --target production --release .sfci/release.json --push` | Validate and deploy that exact version using the production baseline. |
+| `sfci check --target preprod` | Snapshot committed sources, calculate the cumulative delta, and validate it in the configured org. |
+| `sfci plan --target preprod` | Prepare and inspect a plan without submitting a metadata validation. |
+| `sfci deploy --target preprod --push` | Deploy the selected trunk version and publish its successful receipt. |
+| `sfci release --from preprod --output .sfci/release.json` | Freeze the last successful sfci deployment from the configured source org. |
+| `sfci deploy --target prod --release .sfci/release.json --push` | Validate and deploy that exact version using the production baseline. |
 | `sfci status` | Show baselines and unfinished operations recorded locally or on origin. |
-| `sfci resume --target uat --push` | Reconcile a preserved deployment operation without submitting it again. |
+| `sfci resume --target preprod --push` | Reconcile a preserved deployment operation without submitting it again. |
 
 Use `--yes` to confirm mutations in CI, `--json` for a structured result, and `--verbose` for diagnostics. Metadata deletion requires a separate `--allow-destructive` flag. `--mode full` deploys the configured source directories while retaining explicit Git-derived deletions; it does not purge unknown org metadata.
 
@@ -117,13 +152,13 @@ Plans live under `.sfci/plans/<id>/`. Each plan contains its own committed sourc
 Salesforce commands run in disposable copies so their tracking caches cannot change the immutable snapshot. sfci uses its Git receipts as the delivery baseline; native source-tracking conflicts are ignored in these fresh workspaces. This does not add manual-org drift detection.
 
 ```sh
-sfci check --target uat --plan .sfci/plans/<id>/plan.json
-sfci deploy --target uat --plan .sfci/plans/<id>/plan.json --push
+sfci check --target preprod --plan .sfci/plans/<id>/plan.json
+sfci deploy --target preprod --plan .sfci/plans/<id>/plan.json --push
 ```
 
 The production path uses a successful production validation followed by Salesforce Quick Deploy. A UAT validation is never reused for production. Tests default to `RunLocalTests`; `NoTestRun` is rejected for actual production orgs.
 
-`sfci check --target production --plan <path> --refresh` reruns validation after an external deployment or package installation. The cached result is bound to the plan and expires conservatively after nine days; Salesforce determines actual Quick Deploy eligibility.
+`sfci check --target prod --plan <path> --refresh` reruns validation after an external deployment or package installation. The cached result is bound to the plan and expires conservatively after nine days; Salesforce determines actual Quick Deploy eligibility.
 
 ## What is recorded
 

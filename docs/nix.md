@@ -51,7 +51,7 @@ On Linux, or with a configured Linux builder:
 ```sh
 nix build .#image
 docker load --input result
-docker run --rm ghcr.io/yimensar/sfci:0.1.0-alpha.3 sfci --help
+docker run --rm ghcr.io/yimensar/sfci:0.1.0-alpha.4 sfci --help
 ```
 
 The image is built by `dockerTools.buildLayeredImage`; constructing it does not
@@ -81,7 +81,7 @@ For an interactive checkout, mount it and preserve the runner's user identity:
 docker run --rm -it \
   --user 1000:1000 \
   --volume "$PWD:/workspace" \
-  ghcr.io/yimensar/sfci:0.1.0-alpha.3 sfci status
+  ghcr.io/yimensar/sfci:0.1.0-alpha.4 sfci status
 ```
 
 CI services can run the image with their usual user and credentials mechanism.
@@ -139,3 +139,6 @@ Repeat after an sfci source-only change. The application path changes, while
 packaging change can legitimately rebuild dependencies. On Linux, compare image
 layer digests as well when changing image construction; store-path stability
 alone is not a measurement of registry download time.
+
+The package also provides OpenSSL to `sfci auth bootstrap` for certificate creation.
+Keys and generated credentials are runtime data, kept outside the Nix store and Git.

@@ -16,6 +16,9 @@ export async function readConfig(cwd: string): Promise<Config> {
       "CONFIG",
     );
   }
+  return parseConfig(value);
+}
+export function parseConfig(value: unknown): Config {
   if (
     !record(value) ||
     typeof value.trunk !== "string" ||
@@ -55,7 +58,7 @@ export async function readConfig(cwd: string): Promise<Config> {
     }
     if (
       Object.keys(env).some(
-        (key) => !["org", "tests", "promoteFrom"].includes(key),
+        (key) => !["org", "type", "tests", "promoteFrom"].includes(key),
       )
     ) {
       throw new SfciError(
@@ -65,6 +68,16 @@ export async function readConfig(cwd: string): Promise<Config> {
       );
     }
     const tests = env.tests ?? "RunLocalTests";
+    if (
+      env.type !== undefined &&
+      env.type !== "sandbox" &&
+      env.type !== "production"
+    )
+      throw new SfciError(
+        `Invalid org type for ${name}.`,
+        "Choose sandbox or production.",
+        "CONFIG",
+      );
     if (tests !== "RunLocalTests" && tests !== "NoTestRun")
       throw new SfciError(
         `Invalid test level for ${name}.`,
@@ -80,6 +93,7 @@ export async function readConfig(cwd: string): Promise<Config> {
     environments[name] = {
       org: env.org,
       tests,
+      ...(env.type ? { type: env.type as "sandbox" | "production" } : {}),
       ...(typeof env.promoteFrom === "string"
         ? { promoteFrom: env.promoteFrom }
         : {}),

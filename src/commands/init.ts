@@ -13,14 +13,16 @@ import {
 import { dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { CliError, interactive, type OutputOptions } from "../ui.js";
+import { parseConfig } from "../core/config.js";
+import type { Environment } from "../core/types.js";
 import { bitbucketPipeline, githubWorkflow } from "./templates.js";
 
 const exec = promisify(execFile);
 interface InitOptions {
   cwd: string;
   ci?: string;
-  uat?: string;
-  production?: string;
+  environments?: string[];
+  promotions?: string[];
   trunk?: string;
 }
 
@@ -35,21 +37,41 @@ export async function initialize(
       "sfci.yml already exists.",
       "Edit the existing configuration; init never overwrites it.",
     );
-  let { ci, uat, production } = options;
+  let { ci } = options;
   let trunk = options.trunk ?? "main";
-  if ((!ci || !uat || !production) && !interactive(output)) {
-    throw new CliError(
-      "Setup needs a CI provider and two org aliases.",
-      "Run sfci init --ci bitbucket --uat <alias> --production <alias>, or use an interactive terminal.",
-    );
+  const environments: Record<string, Environment> = {};
+  for (const spec of options.environments ?? []) {
+    const [name, type, org, ...extra] = spec.split(":");
+    if (
+      !name ||
+      !["sandbox", "production"].includes(type ?? "") ||
+      extra.length ||
+      environments[name]
+    )
+      throw new CliError(
+        "Invalid or duplicate environment definition.",
+        "Use --environment name:sandbox[:alias] or name:production[:alias].",
+      );
+    environments[name] = {
+      type: type as "sandbox" | "production",
+      org: org || name,
+      tests: "RunLocalTests",
+    };
   }
-  if (interactive(output) && (!ci || !uat || !production)) {
+  if ((!ci || !Object.keys(environments).length) && !interactive(output))
+    throw new CliError(
+      "Setup needs a CI provider and at least one named environment.",
+      "Run sfci init --ci bitbucket --environment preprod:sandbox:my-preprod --environment prod:production:my-prod --promote preprod:prod.",
+    );
+  if (interactive(output) && (!ci || !Object.keys(environments).length)) {
     const prompts = await import("@clack/prompts");
-    const answer = async (value: Promise<string | symbol>): Promise<string> => {
+    const answer = async <T>(
+      value: Promise<T>,
+    ): Promise<Exclude<T, symbol>> => {
       const result = await value;
       if (prompts.isCancel(result))
         throw new CliError("Cancelled.", undefined, "CANCELLED");
-      return result as string;
+      return result as Exclude<T, symbol>;
     };
     prompts.intro("sfci · Salesforce delivery", { output: process.stderr });
     ci ??= await answer(
@@ -67,42 +89,102 @@ export async function initialize(
         prompts.text({
           message: "Trunk branch",
           defaultValue: "main",
-          placeholder: "main",
           output: process.stderr,
         }),
       );
-    uat ??= await answer(
-      prompts.text({
-        message: "UAT org alias or username",
-        placeholder: "uat",
-        validate: validateAlias,
-        output: process.stderr,
-      }),
-    );
-    production ??= await answer(
-      prompts.text({
-        message: "Production org alias or username",
-        placeholder: "production",
-        validate: validateAlias,
-        output: process.stderr,
-      }),
-    );
+    if (!Object.keys(environments).length) {
+      let another = true;
+      while (another) {
+        const name = await answer(
+          prompts.text({
+            message: "Environment name",
+            placeholder: "integration, preprod, prod…",
+            validate: (value) =>
+              /^[a-z][a-z0-9-]{0,47}$/.test(value ?? "") &&
+              !environments[value!]
+                ? undefined
+                : "Use a unique lowercase name.",
+            output: process.stderr,
+          }),
+        );
+        const type = await answer(
+          prompts.select({
+            message: `Org type for ${name}`,
+            options: [
+              { value: "sandbox" as const, label: "Sandbox" },
+              { value: "production" as const, label: "Production" },
+            ],
+            output: process.stderr,
+          }),
+        );
+        const org = await answer(
+          prompts.text({
+            message: `Existing Salesforce alias or username for ${name}`,
+            defaultValue: name,
+            validate: validateAlias,
+            output: process.stderr,
+          }),
+        );
+        const source = await answer(
+          prompts.select({
+            message: `Where does ${name} receive releases from?`,
+            options: [
+              {
+                value: "",
+                label: type === "production"
+                  ? "Current trunk (manually started deployment)"
+                  : "Current trunk (automatic deployment)",
+              },
+              ...Object.keys(environments).map((value) => ({
+                value,
+                label: value,
+              })),
+            ],
+            output: process.stderr,
+          }),
+        );
+        environments[name] = {
+          org,
+          type,
+          tests: "RunLocalTests",
+          ...(source ? { promoteFrom: source } : {}),
+        };
+        another = await answer(
+          prompts.confirm({
+            message: "Add another environment?",
+            initialValue: true,
+            output: process.stderr,
+          }),
+        );
+      }
+    }
   }
   if (ci !== "github" && ci !== "bitbucket")
     throw new CliError(
       "Unknown CI provider.",
       "Choose --ci github or --ci bitbucket.",
     );
-  if (!uat || !production) throw new CliError("Both org aliases are required.");
-  for (const alias of [uat, production]) {
-    const message = validateAlias(alias);
-    if (message) throw new CliError(message);
+  for (const spec of options.promotions ?? []) {
+    const [source, target, ...extra] = spec.split(":");
+    if (
+      !source ||
+      !target ||
+      extra.length ||
+      !environments[target] ||
+      environments[target]!.promoteFrom
+    )
+      throw new CliError(
+        "Invalid or duplicate promotion.",
+        "Use --promote source:target with declared environments.",
+      );
+    environments[target]!.promoteFrom = source;
   }
-  if (uat === production)
-    throw new CliError(
-      "UAT and production must use different aliases.",
-      "Use a distinct Salesforce org for each environment.",
-    );
+  if (
+    new Set(Object.values(environments).map((env) => env.org)).size !==
+    Object.keys(environments).length
+  )
+    throw new CliError("Use a distinct org alias for each environment.");
+  const parsed = parseConfig({ trunk, environments });
   try {
     await exec("git", ["check-ref-format", "--branch", trunk], { cwd });
   } catch {
@@ -113,17 +195,7 @@ export async function initialize(
   }
 
   const { stringify } = await import("yaml");
-  const config = stringify({
-    trunk,
-    environments: {
-      uat: { org: uat, tests: "RunLocalTests" },
-      production: {
-        org: production,
-        tests: "RunLocalTests",
-        promoteFrom: "uat",
-      },
-    },
-  });
+  const config = stringify(parsed);
   const normalPath =
     ci === "github" ? ".github/workflows/sfci.yml" : "bitbucket-pipelines.yml";
   const notes: string[] = [];
@@ -149,9 +221,7 @@ export async function initialize(
     {
       path: pipelinePath,
       content:
-        ci === "github"
-          ? githubWorkflow({ trunk, uat, production })
-          : bitbucketPipeline({ trunk, uat, production }),
+        ci === "github" ? githubWorkflow(parsed) : bitbucketPipeline(parsed),
     },
   ];
   const files: string[] = [];
@@ -192,6 +262,34 @@ export async function initialize(
     "Commit these files, then record the verified baseline of each org.",
   );
   return { files, notes };
+}
+
+export async function generatePipeline(options: {
+  cwd: string;
+  ci: "bitbucket" | "github";
+}): Promise<{ files: string[]; notes: string[] }> {
+  const cwd = resolve(options.cwd);
+  await requireProject(cwd);
+  const config = await (await import("../core/config.js")).readConfig(cwd);
+  const normal =
+    options.ci === "bitbucket"
+      ? "bitbucket-pipelines.yml"
+      : ".github/workflows/sfci.yml";
+  const path = (await exists(resolve(cwd, normal)))
+    ? `sfci.${options.ci}.example.yml`
+    : normal;
+  await mkdir(dirname(resolve(cwd, path)), { recursive: true });
+  await writeFile(
+    resolve(cwd, path),
+    options.ci === "bitbucket"
+      ? bitbucketPipeline(config)
+      : githubWorkflow(config),
+    { flag: "wx" },
+  );
+  return {
+    files: [path],
+    notes: ["Generated from sfci.yml. Review the pipeline before committing."],
+  };
 }
 
 function validateAlias(value: string | undefined): string | undefined {

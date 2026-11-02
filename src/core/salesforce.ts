@@ -4,12 +4,27 @@ import {
   type Options,
   type Plan,
   type Runtime,
+  type Environment,
 } from "./types.js";
 import { defaultRuntime } from "./process.js";
 import { redact } from "../redact.js";
 
 export const runtime = (options: Options): Runtime =>
   options.runtime ?? defaultRuntime;
+export function assertOrgType(
+  environment: Environment,
+  org: { production: boolean },
+): void {
+  if (
+    environment.type &&
+    (environment.type === "production") !== org.production
+  )
+    throw new SfciError(
+      "The org type does not match sfci.yml.",
+      "Check the alias and credentials before continuing.",
+      "ORG_TYPE",
+    );
+}
 export async function identify(
   options: Options,
   org: string,

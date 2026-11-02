@@ -70,25 +70,64 @@ program
       "bitbucket",
     ]),
   )
-  .option("--uat <alias>", "UAT org alias or username")
-  .option("--production <alias>", "production org alias or username")
+  .option(
+    "--environment <name:type[:alias]>",
+    "named sandbox/production environment (repeatable)",
+    (value: string, values: string[]) => [...values, value],
+    [],
+  )
+  .option(
+    "--promote <source:target>",
+    "promote a frozen release between environments (repeatable)",
+    (value: string, values: string[]) => [...values, value],
+    [],
+  )
   .option("--trunk <branch>", "trunk branch (default: main)")
   .action(
     async (options: {
       ci?: string;
-      uat?: string;
-      production?: string;
+      environment?: string[];
+      promote?: string[];
       trunk?: string;
     }) => {
       const ctx = context();
       const { initialize } = await import("./commands/init.js");
       output(
         "init",
-        await initialize({ cwd: ctx.cwd, ...options }, ctx.output),
+        await initialize(
+          {
+            cwd: ctx.cwd,
+            ...(options.ci ? { ci: options.ci } : {}),
+            ...(options.trunk ? { trunk: options.trunk } : {}),
+            environments: options.environment ?? [],
+            promotions: options.promote ?? [],
+          },
+          ctx.output,
+        ),
         ctx.output,
       );
     },
   );
+
+program
+  .command("pipeline")
+  .description(
+    "Generate a pipeline from sfci.yml without overwriting existing files",
+  )
+  .addOption(
+    new Option("--ci <provider>", "CI provider")
+      .choices(["bitbucket", "github"])
+      .makeOptionMandatory(),
+  )
+  .action(async (options: { ci: "bitbucket" | "github" }) => {
+    const ctx = context();
+    const { generatePipeline } = await import("./commands/init.js");
+    output(
+      "init",
+      await generatePipeline({ cwd: ctx.cwd, ci: options.ci }),
+      ctx.output,
+    );
+  });
 
 program
   .command("doctor")
@@ -106,10 +145,10 @@ program
     if (!result.ok) process.exitCode = 1;
   });
 
-program
+const authCommand = program
   .command("auth")
   .description("Connect an org with JWT using the bundled Salesforce CLI")
-  .requiredOption("--target <environment>", "configured environment")
+  .option("--target <environment>", "configured environment")
   .option(
     "--client-id <id>",
     "Salesforce application client ID (or SF_CLIENT_ID)",
@@ -134,6 +173,8 @@ program
       jwtKeyFile?: string;
       instanceUrl?: string;
     }) => {
+      if (!options.target)
+        throw new CliError("Specify --target <environment>.");
       const ctx = context();
       const { authenticate } = await import("./commands/auth.js");
       output(
@@ -143,6 +184,64 @@ program
           ctx.output,
           () => authenticate({ cwd: ctx.cwd, ...options }),
         ),
+        ctx.output,
+      );
+    },
+  );
+
+authCommand
+  .command("bootstrap")
+  .description(
+    "Create or restore a JWT External Client App using an admin connection (experimental)",
+  )
+  .requiredOption(
+    "--admin-org <alias>",
+    "existing administrator connection, separate from the delivery alias",
+  )
+  .option("--output <directory>", "private credential directory outside Git")
+  .option("--app-name <name>", "External Client App API name")
+  .option(
+    "--after-refresh",
+    "accept the changed org ID of a refreshed sandbox",
+    false,
+  )
+  .option(
+    "-y, --yes",
+    "confirm app creation and app-access authorization",
+    false,
+  )
+  .addHelpText(
+    "after",
+    "\nRequired auth options: --target <environment> --username <integration-user>\nExample: sfci auth bootstrap --target preprod --username ci@example.com.preprod --admin-org preprod-admin\nPrivate keys are stored outside Git. Qualify bootstrap on a dedicated sandbox first.",
+  )
+  .action(
+    async (options: {
+      target: string;
+      adminOrg: string;
+      username: string;
+      output?: string;
+      appName?: string;
+      afterRefresh: boolean;
+      yes: boolean;
+    }) => {
+      const ctx = context();
+      const shared = authCommand.opts<{ target?: string; username?: string }>();
+      if (!shared.target || !shared.username)
+        throw new CliError("Bootstrap requires --target and --username.");
+      const settings = {
+        ...options,
+        target: shared.target,
+        username: shared.username,
+      };
+      const { bootstrap } = await import("./commands/bootstrap.js");
+      output(
+        "bootstrap",
+        await bootstrap({
+          ...settings,
+          cwd: ctx.cwd,
+          approve: (message) =>
+            confirmAction(message, options.yes, ctx.output),
+        }),
         ctx.output,
       );
     },

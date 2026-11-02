@@ -71,7 +71,7 @@ test("help and version work without a Salesforce project or connection", () => {
   assert.equal(help.stderr, "");
   const version = run(["--version"], tmpdir());
   assert.equal(version.status, 0);
-  assert.match(version.stdout, /^0\.1\.0-alpha\.3\n$/);
+  assert.match(version.stdout, /^0\.1\.0-alpha\.4\n$/);
 });
 
 test("usage errors are one structured JSON result without terminal formatting", () => {
@@ -116,10 +116,12 @@ test("init creates a working configuration and GitHub workflow", async () => {
       "init",
       "--ci",
       "github",
-      "--uat",
-      "partial",
-      "--production",
-      "production",
+      "--environment",
+      "uat:sandbox:partial",
+      "--environment",
+      "production:production:production",
+      "--promote",
+      "uat:production",
       "--json",
     ],
     root,
@@ -149,7 +151,7 @@ test("init creates a working configuration and GitHub workflow", async () => {
     join(root, ".github/workflows/sfci.yml"),
     "utf8",
   );
-  assert.match(pipeline, /ghcr\.io\/yimensar\/sfci:0\.1\.0-alpha\.3/);
+  assert.match(pipeline, /ghcr\.io\/yimensar\/sfci:0\.1\.0-alpha\.4/);
   assert.match(pipeline, /head\.repo\.full_name == github\.repository/);
   assert.doesNotMatch(pipeline, /pull_request_target/);
   assert.match(pipeline, /\$\{\{ secrets\.SF_JWT_KEY_B64 \}\}/);
@@ -167,10 +169,12 @@ test("init preserves an existing pipeline and generates a separate example", asy
       "init",
       "--ci",
       "bitbucket",
-      "--uat",
-      "partial",
-      "--production",
-      "production",
+      "--environment",
+      "uat:sandbox:partial",
+      "--environment",
+      "production:production:production",
+      "--promote",
+      "uat:production",
     ],
     root,
   );
@@ -200,10 +204,10 @@ test("init never replaces an existing sfci configuration", async () => {
       "init",
       "--ci",
       "github",
-      "--uat",
-      "uat",
-      "--production",
-      "prod",
+      "--environment",
+      "uat:sandbox:partial",
+      "--environment",
+      "production:production:prod",
     ],
     root,
   );
@@ -227,10 +231,10 @@ test("init refuses an existing example before writing any configuration", async 
       "init",
       "--ci",
       "bitbucket",
-      "--uat",
-      "uat",
-      "--production",
-      "prod",
+      "--environment",
+      "uat:sandbox:partial",
+      "--environment",
+      "production:production:prod",
     ],
     root,
   );
@@ -246,15 +250,15 @@ test("init refuses aliases that would inject commands into CI templates", async 
       "init",
       "--ci",
       "bitbucket",
-      "--uat",
-      "uat; echo bad",
-      "--production",
-      "prod",
+      "--environment",
+      "uat:sandbox:bad; echo bad",
+      "--environment",
+      "production:production:prod",
     ],
     root,
   );
   assert.equal(result.status, 1);
-  assert.match(result.stdout, /simple org alias/);
+  assert.match(result.stdout, /Invalid environment/);
   await assert.rejects(readFile(join(root, "sfci.yml")), { code: "ENOENT" });
 });
 
@@ -268,10 +272,10 @@ test("init refuses a symbolic .gitignore before writing project files", async ()
       "init",
       "--ci",
       "github",
-      "--uat",
-      "uat",
-      "--production",
-      "prod",
+      "--environment",
+      "uat:sandbox:partial",
+      "--environment",
+      "production:production:prod",
     ],
     root,
   );
@@ -288,8 +292,15 @@ test("generated YAML is valid and uses a frozen release for production", () => {
   for (const generator of [bitbucketPipeline, githubWorkflow]) {
     const yaml = generator({
       trunk: "main",
-      uat: "partial",
-      production: "production",
+      environments: {
+        uat: { org: "partial", type: "sandbox", tests: "RunLocalTests" },
+        production: {
+          org: "production",
+          type: "production",
+          tests: "RunLocalTests",
+          promoteFrom: "uat",
+        },
+      },
     });
     assert.doesNotThrow(() => parse(yaml));
     assert.ok(
@@ -303,16 +314,27 @@ test("generated YAML is valid and uses a frozen release for production", () => {
     assert.doesNotMatch(yaml, /npm install|sf plugins install|apt-get|python/);
   }
   const workflow = parse(
-    githubWorkflow({ trunk: "main", uat: "partial", production: "production" }),
+    githubWorkflow({
+      trunk: "main",
+      environments: {
+        uat: { org: "partial", type: "sandbox", tests: "RunLocalTests" },
+        production: {
+          org: "production",
+          type: "production",
+          tests: "RunLocalTests",
+          promoteFrom: "uat",
+        },
+      },
+    }),
   ) as {
     jobs: {
-      freeze: { environment: string };
+      "freeze-production": { environment: string };
       "deploy-production": {
         steps: { uses?: string; with?: { path?: string } }[];
       };
     };
   };
-  assert.equal(workflow.jobs.freeze.environment, "uat");
+  assert.equal(workflow.jobs["freeze-production"].environment, "uat");
   assert.equal(
     workflow.jobs["deploy-production"].steps.find(
       (step) => step.uses === "actions/download-artifact@v4",
@@ -323,7 +345,18 @@ test("generated YAML is valid and uses a frozen release for production", () => {
 
 test("Bitbucket trunk condition quotes shell metacharacters safely", () => {
   const trunk = "topic/$(printf-owned)";
-  const yaml = bitbucketPipeline({ trunk, uat: "uat", production: "prod" });
+  const yaml = bitbucketPipeline({
+    trunk,
+    environments: {
+      uat: { org: "uat", type: "sandbox", tests: "RunLocalTests" },
+      production: {
+        org: "prod",
+        type: "production",
+        tests: "RunLocalTests",
+        promoteFrom: "uat",
+      },
+    },
+  });
   assert.match(
     yaml,
     /test "\$BITBUCKET_PR_DESTINATION_BRANCH" = 'topic\/\$\(printf-owned\)'/,
@@ -398,4 +431,74 @@ test("diagnostics redact authentication URLs and secrets from the environment", 
     if (old === undefined) delete process.env.SFCI_TEST_TOKEN;
     else process.env.SFCI_TEST_TOKEN = old;
   }
+});
+
+test("init supports freely named environments and pipeline regeneration preserves the current pipeline", async () => {
+  const cwd = await project();
+  const result = run(
+    [
+      "--json",
+      "init",
+      "--ci",
+      "bitbucket",
+      "--environment",
+      "integration:sandbox:int",
+      "--environment",
+      "staging:sandbox:stage",
+      "--environment",
+      "live:production:prod",
+      "--promote",
+      "integration:staging",
+      "--promote",
+      "staging:live",
+    ],
+    cwd,
+  );
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const config = parse(await readFile(join(cwd, "sfci.yml"), "utf8"));
+  assert.deepEqual(Object.keys(config.environments), [
+    "integration",
+    "staging",
+    "live",
+  ]);
+  assert.equal(config.environments.live.type, "production");
+  const original = await readFile(join(cwd, "bitbucket-pipelines.yml"), "utf8");
+  const regenerate = run(["--json", "pipeline", "--ci", "bitbucket"], cwd);
+  assert.equal(regenerate.status, 0, regenerate.stdout);
+  assert.equal(
+    await readFile(join(cwd, "bitbucket-pipelines.yml"), "utf8"),
+    original,
+  );
+  assert.equal(
+    await readFile(join(cwd, "sfci.bitbucket.example.yml"), "utf8"),
+    original,
+  );
+});
+
+test("bootstrap parses its inherited target/username and requires an explicit administrator", async () => {
+  const cwd = await project();
+  await writeFile(
+    join(cwd, "sfci.yml"),
+    "trunk: main\nenvironments:\n  qa:\n    type: sandbox\n    org: delivery\n",
+  );
+  const result = run(
+    [
+      "--json",
+      "auth",
+      "bootstrap",
+      "--target",
+      "qa",
+      "--username",
+      "ci@example.invalid",
+      "--admin-org",
+      "delivery",
+      "--yes",
+    ],
+    cwd,
+  );
+  assert.equal(result.status, 1);
+  assert.match(
+    JSON.parse(result.stdout).error.message,
+    /separate administrator alias/,
+  );
 });

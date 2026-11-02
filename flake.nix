@@ -43,7 +43,7 @@
         let p = packageFor system;
         in {
           default = p.pkgs.mkShell {
-            packages = [ p.pkgs.nodejs_22 p.pkgs.gitMinimal ];
+            packages = [ p.pkgs.nodejs_22 p.pkgs.gitMinimal p.pkgs.openssl ];
             shellHook = ''
               export PATH="$PWD/node_modules/.bin:$PATH"
             '';

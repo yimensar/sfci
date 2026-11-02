@@ -1,6 +1,7 @@
 export type TestLevel = "RunLocalTests" | "NoTestRun";
 export interface Environment {
   org: string;
+  type?: "sandbox" | "production";
   tests: TestLevel;
   promoteFrom?: string;
 }

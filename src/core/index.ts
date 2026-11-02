@@ -19,7 +19,13 @@ import {
   withExecutionWorkspace,
 } from "./plan.js";
 import { git, privateSalesforceCli } from "./process.js";
-import { identify, jobId, runtime, waitForJob } from "./salesforce.js";
+import {
+  assertOrgType,
+  identify,
+  jobId,
+  runtime,
+  waitForJob,
+} from "./salesforce.js";
 import {
   baseline,
   canonical,
@@ -167,6 +173,7 @@ export async function doctor(options: Options & { target?: string }): Promise<{
       const env = (await readConfig(options.cwd)).environments[target];
       if (!env) throw new SfciError(`Unknown environment ${target}.`);
       const org = await identify(options, env.org);
+      assertOrgType(env, org);
       return `${org.orgId} (${org.production ? "production" : "sandbox"})`;
     });
     await check(
@@ -233,6 +240,7 @@ export async function setBaseline(
     );
   const sha = await commit(cwd, options.commit);
   const org = await identify({ ...options, cwd }, env.org);
+  assertOrgType(env, org);
   return locked(cwd, org.orgId, async () => {
     await assertNoRemoteClaim(cwd, org.orgId);
     await refresh(cwd, config.trunk);
@@ -574,6 +582,7 @@ export async function createRelease(
       "RELEASE",
     );
   const org = await identify({ ...options, cwd }, env.org);
+  assertOrgType(env, org);
   if (org.orgId !== receipt.orgId)
     throw new SfciError(
       "The source org no longer matches its deployment receipt.",
@@ -673,6 +682,7 @@ export async function resume(
       "CONFIG",
     );
   const org = await identify({ ...options, cwd }, env.org);
+  assertOrgType(env, org);
   let claim = await remoteClaim(cwd, org.orgId);
   if (
     claim &&
@@ -778,6 +788,7 @@ export async function resume(
     );
   return locked(cwd, plan.orgId, async () => {
     const org = await identify({ ...options, cwd }, plan.org);
+    assertOrgType(env, org);
     if (org.orgId !== plan.orgId)
       throw new SfciError(
         "The org identity changed after submission.",

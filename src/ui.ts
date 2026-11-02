@@ -83,7 +83,21 @@ export function output(
     return;
   }
   const value = asRecord(result);
-  if (command === "auth") {
+  if (command === "bootstrap") {
+    process.stdout.write(
+      `JWT bootstrap verified for ${String(value.target)} (${String(value.orgId)}).\n`,
+    );
+    process.stdout.write(
+      `  App ${String(value.appName)}\n  Certificate ${String(value.certificateFingerprint)}\n`,
+    );
+    process.stdout.write(
+      `  Private Bitbucket variables file: ${String(value.credentialsFile)}\n`,
+    );
+    if (value.afterRefresh)
+      process.stdout.write(
+        "  Verify the refreshed sandbox source state, then explicitly record its new baseline.\n",
+      );
+  } else if (command === "auth") {
     process.stdout.write(
       `Authenticated ${String(value.target)} (${String(value.org)}) using JWT.\n`,
     );

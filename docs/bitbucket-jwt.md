@@ -1,118 +1,153 @@
-# Bitbucket Pipelines with Salesforce JWT
+# Named environments, Bitbucket and JWT
 
-Use a preproduction sandbox and a production org. In the generated configuration,
-`uat` is the logical preproduction target; its alias can be named `myproject-preprod`.
-CI uses JWT exclusively. Existing local Salesforce CLI connections remain reusable.
+Environment names and promotion paths belong to your project. Each environment
+has an `org` alias, a `type` (`sandbox` or `production`) and optionally a
+`promoteFrom` source. Existing configurations without `type` still work for
+ordinary delivery; add it before using bootstrap. Actual org type is checked
+against the declaration.
+For regenerated pipelines, only explicitly typed sandbox roots deploy automatically;
+an older untyped root uses a manually started pipeline until its type is declared.
 
-## Prepare Salesforce
+## Configure your path
 
-For each environment, use a dedicated integration user and an OAuth application
-that supports JWT bearer authentication. Configure its public certificate and
-authorize that user. An External Client App is suitable for new setups; an existing
-Connected App can be used when it supports the required flow.
+Run `sfci init` interactively, or supply repeatable options:
 
-Keep a separate RSA private key/certificate pair for each environment. Upload the
-certificate to Salesforce; the private key belongs in the CI secret store. Obtain
-the application's consumer key/client ID and the integration user's username.
-No client secret or refresh-token authorization URL is needed by this flow.
+```sh
+sfci init --ci bitbucket \
+  --environment integration:sandbox:my-int \
+  --environment preprod:sandbox:my-preprod \
+  --environment prod:production:my-prod \
+  --promote integration:preprod \
+  --promote preprod:prod
+```
 
-Salesforce's official instructions cover [External Client App configuration](https://developer.salesforce.com/docs/platform/sfdx-dev/guide/sfdx-dev-auth-eca.html)
-and the [JWT login command](https://github.com/salesforcecli/plugin-auth#sf-org-login-jwt).
+Omit a stage you do not use. `--environment qa:sandbox` defaults its alias to `qa`.
+The first stage is validated on PRs and deployed from the current trunk. Each
+promoted stage receives its own custom pipeline (`promote-preprod`, `promote-prod`)
+that freezes a successful source receipt and waits before the target deployment.
+A direct production target uses a manually started custom pipeline rather than an
+automatic deployment on push. Independent root stages are also supported.
 
-## Configure Bitbucket
+```yaml
+trunk: main
+environments:
+  integration:
+    type: sandbox
+    org: my-int
+    tests: RunLocalTests
+  preprod:
+    type: sandbox
+    org: my-preprod
+    tests: RunLocalTests
+    promoteFrom: integration
+  prod:
+    type: production
+    org: my-prod
+    tests: RunLocalTests
+    promoteFrom: preprod
+```
 
-Under **Repository settings → Pipelines → Deployments**, create environments named
-`uat` and `production`. Add the same variable names with different values in each:
+After editing the configuration, use `sfci pipeline --ci bitbucket`. It preserves
+an existing pipeline and writes `sfci.bitbucket.example.yml` for review. Rename or
+review an old example before generating another. Commit your setup with `[skip ci]`,
+push trunk, and record verified baselines before the first normal run. A new empty
+scaffold is a valid baseline only for a genuinely empty managed application scope.
 
-| Variable | Description |
+## Bootstrap an External Client App (experimental)
+
+Bootstrap uses an existing administrator connection; it cannot authenticate to an
+unknown org without initial authorization. Keep that alias separate from the
+configured delivery alias, which will be authenticated as the integration user.
+An existing administrator connection made with Salesforce CLI can be reused.
+
+The integration user must already exist and possess the API/deployment rights
+needed by your project. Bootstrap creates a dedicated, empty app-access permission
+set, authorizes that set for JWT, and assigns it to this user. It does not grant
+System Administrator, business permissions or deployment rights, or relax IP rules.
+
+```sh
+sfci auth bootstrap --target preprod \
+  --admin-org preprod-admin \
+  --username ci@example.com.preprod
+```
+
+The command identifies the org and user, generates an RSA-3072 key and one-year
+self-signed public certificate using Node/OpenSSL, prepares the metadata, and asks
+for confirmation showing the real org ID and certificate fingerprint. `--yes`
+allows a deliberately confirmed noninteractive run. It then creates the External
+Client App through Salesforce metadata deployment (API 68.0), assigns app access and verifies
+JWT login using the official CLI.
+
+OpenSSL is included in the Nix package; npm users must provide it. Generated keys,
+certificate, bootstrap state and `bitbucket-variables.json` live in a private
+`~/.local/share/sfci/auth/<project-id>/<target>/` directory, outside Git. Override
+with `--output <private-directory>` for an established secure location. Directory
+and secret-file permissions are restricted. Tokens and private values are never
+returned by the command. Protect/back up this directory in your secure store;
+base64 transport encoding is not encryption. Do not put it in CI artifacts.
+
+App names default to `Sfci_<environment>`. `--app-name` selects another API name.
+An existing unrelated app or permission-set name is not overwritten. Subsequent
+runs reuse their private state. A missing original key stops the command rather
+than silently rotating an active identity. Bootstrap does not replace permissions
+on an existing access set. A partially configured existing set requiring a new
+assignment must be reviewed and assigned explicitly before retrying.
+
+**The bootstrap has offline tests and metadata resolution checks, not live-org
+qualification.** Salesforce may require propagation time or reject metadata or
+client-credential conflicts. A rejected verification preserves private state for
+retry and does not claim the environment is ready. Validate on a dedicated sandbox
+before using bootstrap in production. Ordinary JWT authentication remains separate.
+
+## Configure Bitbucket variables
+
+Create Bitbucket environments matching your configuration names, with appropriate
+Test/Staging/Production categories. For each environment configure:
+
+| Variable | Value |
 | --- | --- |
-| `SF_CLIENT_ID` | Salesforce application consumer key/client ID. |
-| `SF_USERNAME` | Integration user authorized for that application. |
-| `SF_INSTANCE_URL` | HTTPS login/My Domain URL, normally `https://test.salesforce.com` for the sandbox and `https://login.salesforce.com` for production. |
-| `SF_JWT_KEY_B64` | Base64-encoded RSA PEM private key. Mark it **Secured**. |
+| `SF_CLIENT_ID` | Application consumer key/client ID. Existing `SFDX_CLIENT_ID` is accepted. |
+| `SF_USERNAME` | Authorized integration user. |
+| `SF_INSTANCE_URL` | HTTPS org login/My Domain URL. |
+| `SF_JWT_KEY_B64` | RSA private key in base64; mark it **Secured**. |
 
-`SFDX_CLIENT_ID` is accepted when migrating an existing pipeline; `SF_CLIENT_ID`
-takes precedence when both are set. Scope all four values to their environment;
-avoid repository/workspace variables carrying production credentials. The check
-and release-freeze steps use `environment: uat` to access preproduction variables
-without recording a deployment. Delivery steps use `deployment: uat` or
-`deployment: production`.
+After a successful bootstrap, the private `bitbucket-variables.json` contains these
+values for transfer to your secured environment settings. Bootstrap does not write
+to Bitbucket or create its environments. Keys for different orgs stay separate.
+The generated pipeline calls `sfci auth --target <name>` with its environment's
+variables. `--jwt-key-file` / `SF_JWT_KEY_FILE` also support a caller-owned key file.
+Existing local Salesforce CLI authenticated aliases remain reusable.
 
-Use a fresh key for a new setup. If a key is suspected compromised, replace its
-certificate and revoke access before relying on it. Do not copy keys into this
-repository, image, plan artifacts or the Nix store. Base64 is transport encoding,
-not encryption. Restrict deployment permissions to your authorized branches/users.
+Keep Bitbucket's preconfigured HTTP Git origin when it supplies the required
+write access. Receipt and checkpoint publication requires creating `sfci/*` tags
+and updating/deleting `sfci-pending/*` tags. Salesforce JWT does not authenticate Git.
 
-See Atlassian's [environment variable scoping](https://support.atlassian.com/bitbucket-cloud/docs/step-options/#Environment)
-and [secured variables](https://support.atlassian.com/bitbucket-cloud/docs/variables-and-secrets/).
+## After a sandbox refresh
 
-The pipeline also needs Git write access to its origin for sfci receipts and
-pending checkpoints. Allow creation/update/deletion of `sfci-pending/*` tags and
-creation of `sfci/*` receipts. Keep Bitbucket's preconfigured HTTP origin when it
-provides the required access. If your restrictions prevent that, configure a
-suitable repository-scoped token or authorized SSH identity using Bitbucket's
-[push-back guidance](https://support.atlassian.com/bitbucket-cloud/docs/push-back-to-your-repository/).
-Salesforce JWT credentials do not authenticate Git operations.
-
-## Initialize the project
-
-Install the runtime, create a standard Salesforce project, and initialize Git:
+1. Reconnect/verify the administrator alias against the refreshed sandbox.
+2. Restore the sandbox's original private bootstrap directory from your secure store.
+3. Run bootstrap with the same target/output and `--after-refresh`.
+4. Verify the resulting Bitbucket variable values and JWT login.
+5. Verify which source commit the refresh actually copied, then explicitly record
+   that sandbox's new deployment baseline. Do not infer it from a successful login.
 
 ```sh
-nix profile add github:yimensar/sfci/v0.1.0-alpha.3
-sf template generate project --name myproject --template standard
-cd myproject
-git init -b main
-sfci init --ci bitbucket --uat myproject-preprod --production myproject-prod
+sfci auth bootstrap --target preprod --admin-org preprod-admin \
+  --username ci@example.com.preprod --after-refresh
+sfci baseline set --target preprod --commit <verified-source-commit> --push
 ```
 
-An existing pipeline is preserved; review and merge `sfci.bitbucket.example.yml`
-when one is generated. sfci never overwrites it.
+`--after-refresh` is sandbox-only. It accepts its changed org ID, reuses its key and
+requested client ID, and recreates/reapplies its own app. It never changes production
+credentials, deletes pending deployments or guesses an org baseline. If Salesforce
+rejects a client ID conflict, stop and reconcile the identity before updating CI.
 
-Before the first delivery, authenticate and verify the orgs. With the appropriate
-JWT variables in your local environment, or explicit command options:
-
-```sh
-sfci auth --target uat
-sfci doctor --target uat
-```
-
-Before baselines exist, doctor reports their absence; verify its org ID and
-sandbox/production type. Repeat for production with its own credentials.
-An existing local Salesforce CLI connection can be used without authenticating again.
-
-Commit the project setup with `[skip ci]`, then push `main` to your new Bitbucket
-origin. Record the verified initial baseline for each org before the first normal
-pipeline run. The initial scaffold can be that baseline only when its empty
-managed source scope represents the application state of both orgs. Retrieve and
-verify existing components first when adopting a populated project.
-
-```sh
-git add .
-git commit -m 'chore: initialize Salesforce delivery [skip ci]'
-# Add your Bitbucket origin, then push main before publishing receipt tags.
-git push -u origin main
-sfci baseline set --target uat --commit HEAD --push
-sfci baseline set --target production --commit HEAD --push
-```
-
-With both baselines and the environment variables configured, the generated pipeline:
-
-1. Validates pull requests against preproduction using JWT.
-2. Deploys the current `main` to preproduction and records its receipt.
-3. Runs `promote-production` on demand to freeze the last version delivered there.
-4. Waits at its manual production step, then validates and deploys that frozen commit.
-
-`sfci auth --target <environment>` delegates to the bundled `sf org login jwt`.
-Explicit options `--client-id`, `--username`, `--instance-url` and `--jwt-key-file`
-take precedence over environment variables. `SF_JWT_KEY_FILE` can reference a key
-provided by your secret manager instead of using `SF_JWT_KEY_B64`.
-
-Decoded keys are written under the system temporary directory with a private
-directory and file permissions (`0700`/`0600`), then removed on success or error.
-A caller-supplied key file is left untouched. `--json` returns only target, alias
-and authentication method; Salesforce tokens are never included.
-
-These templates and offline tests do not establish that your Salesforce app,
-certificate/user authorization or Bitbucket permissions are correctly provisioned.
-Run the [dedicated-sandbox acceptance recipe](acceptance.md) before production use.
+Sources: [Salesforce ECA setup](https://developer.salesforce.com/docs/platform/sfdx-dev/guide/sfdx-dev-auth-eca.html),
+[Metadata API](https://resources.docs.salesforce.com/latest/latest/en-us/sfdc/pdf/api_meta.pdf),
+[JWT CLI](https://github.com/salesforcecli/plugin-auth#sf-org-login-jwt),
+[Bitbucket environment scoping](https://support.atlassian.com/bitbucket-cloud/docs/step-options/#Environment),
+[push-back](https://support.atlassian.com/bitbucket-cloud/docs/push-back-to-your-repository/).
+Hardis' [auth bootstrap](https://sfdx-hardis.cloudity.com/hardis/project/configure/auth/)
+was studied as a reference: it automates the ECA/certificate and supports encrypted
+repository or external storage. sfci's implementation uses official metadata fields,
+Node, OpenSSL and Salesforce CLI, with private material outside the repository.
