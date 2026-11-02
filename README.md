@@ -13,7 +13,7 @@ Known inherited dependency audit findings are recorded in [the alpha dependency 
 Install the complete runtime with Nix:
 
 ```sh
-nix profile add github:yimensar/sfci/v0.1.0-alpha.2
+nix profile add github:yimensar/sfci/v0.1.0-alpha.3
 sfci init
 ```
 
@@ -52,7 +52,7 @@ sfci init
 sfci init --ci bitbucket --uat partial --production production
 ```
 
-It creates `sfci.yml`, ignores generated state under `.sfci/`, and writes a GitHub Actions or Bitbucket Pipelines template. Existing configurations are preserved; an existing pipeline gets a separate example to review and integrate.
+It creates `sfci.yml`, ignores generated state under `.sfci/`, and writes a Bitbucket Pipelines or GitHub Actions template. Existing configurations are preserved; an existing pipeline gets a separate example to review and integrate. The logical `uat` target represents the preproduction sandbox.
 
 ```yaml
 trunk: main
@@ -67,12 +67,23 @@ environments:
     promoteFrom: uat
 ```
 
-Connect each org with Salesforce CLI. Nix and the image expose the bundled `sf` command. For example, use your existing web/JWT authentication, or configure the generated pipeline's protected `SF_AUTH_URL` environment secret. Never commit authentication files or include Salesforce CLI authentication directories in artifacts.
+CI authentication uses JWT exclusively, through the bundled Salesforce CLI. Set these variables separately in the Bitbucket `uat` and `production` environments:
+
+| Variable | Value |
+| --- | --- |
+| `SF_CLIENT_ID` | OAuth application consumer key/client ID. Existing `SFDX_CLIENT_ID` variables are also accepted. |
+| `SF_USERNAME` | Authorized Salesforce integration user. |
+| `SF_INSTANCE_URL` | HTTPS Salesforce login or My Domain URL. |
+| `SF_JWT_KEY_B64` | Base64-encoded RSA private key, stored as a secured variable. |
+
+The Salesforce application must trust the corresponding certificate and authorize the integration user. sfci calls `sf org login jwt`; it does not implement JWT signing or token storage. It writes the decoded key to a private temporary file, removes it after the authentication attempt, and never prints the access token returned by Salesforce. See the [Bitbucket and JWT setup guide](docs/bitbucket-jwt.md).
 
 ```sh
-sfci auth --target uat --instance-url https://test.salesforce.com
+sfci auth --target uat
 sfci doctor --target uat
 ```
+
+Locally, existing Salesforce CLI aliases and authenticated orgs remain usable. To connect explicitly with a key file, use `sfci auth --target uat --client-id <id> --username <user> --instance-url <url> --jwt-key-file <path>`. The same inputs can be supplied through environment variables, including `SF_JWT_KEY_FILE` instead of base64. Keep keys and Salesforce authentication directories outside Git, CI artifacts and the Nix store.
 
 Before the first deployment, record the Git commit known to represent **each** org:
 

@@ -51,7 +51,7 @@ On Linux, or with a configured Linux builder:
 ```sh
 nix build .#image
 docker load --input result
-docker run --rm ghcr.io/yimensar/sfci:0.1.0-alpha.2 sfci --help
+docker run --rm ghcr.io/yimensar/sfci:0.1.0-alpha.3 sfci --help
 ```
 
 The image is built by `dockerTools.buildLayeredImage`; constructing it does not
@@ -81,12 +81,14 @@ For an interactive checkout, mount it and preserve the runner's user identity:
 docker run --rm -it \
   --user 1000:1000 \
   --volume "$PWD:/workspace" \
-  ghcr.io/yimensar/sfci:0.1.0-alpha.2 sfci status
+  ghcr.io/yimensar/sfci:0.1.0-alpha.3 sfci status
 ```
 
 CI services can run the image with their usual user and credentials mechanism.
 Authentication files and deployment plans live outside the image and Nix store.
-Use CI environment secrets for Salesforce credentials.
+Use environment-scoped JWT credentials for Salesforce authentication; see
+[Bitbucket and JWT setup](bitbucket-jwt.md). Never place a private key in a flake
+input, image layer or Nix store.
 
 ## Publish
 

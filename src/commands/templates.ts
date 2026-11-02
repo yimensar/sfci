@@ -3,18 +3,22 @@ interface PipelineOptions {
   uat: string;
   production: string;
 }
-const image = "ghcr.io/yimensar/sfci:0.1.0-alpha.2";
+const image = "ghcr.io/yimensar/sfci:0.1.0-alpha.3";
 const expression = (value: string): string => "$" + "{{ " + value + " }}";
-const authSecret = expression("secrets.SF_AUTH_URL");
+const jwtSecrets = [
+  "SF_CLIENT_ID",
+  "SF_USERNAME",
+  "SF_INSTANCE_URL",
+  "SF_JWT_KEY_B64",
+]
+  .map((name) => `          ${name}: ${expression(`secrets.${name}`)}`)
+  .join("\n");
 const shellQuote = (value: string): string =>
   `'${value.replaceAll("'", "'\\''")}'`;
 
-export function bitbucketPipeline({
-  trunk,
-  uat,
-  production,
-}: PipelineOptions): string {
-  return `# Set SF_AUTH_URL separately in the uat and production deployment environments.
+export function bitbucketPipeline({ trunk }: PipelineOptions): string {
+  return `# Set SF_CLIENT_ID, SF_USERNAME, SF_INSTANCE_URL and secured SF_JWT_KEY_B64
+# separately in the uat and production deployment environments (JWT only).
 # Initialize and push the baseline receipts before the first run.
 # Use one deployment coordinator per org. The same concurrency group must cover
 # every pipeline that writes to that org; never cancel an active deployment.
@@ -34,7 +38,7 @@ pipelines:
           concurrency-group: sfci-uat
           script:
             - test "$BITBUCKET_PR_DESTINATION_BRANCH" = ${shellQuote(trunk)}
-            - printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias ${uat} --sfdx-url-stdin
+            - sfci auth --target uat
             - sfci check --target uat
           artifacts:
             - .sfci/plans/**
@@ -45,7 +49,7 @@ pipelines:
           deployment: uat
           concurrency-group: sfci-uat
           script:
-            - printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias ${uat} --sfdx-url-stdin
+            - sfci auth --target uat
             - sfci deploy --target uat --yes --push
           artifacts:
             - name: sfci-uat
@@ -60,7 +64,7 @@ pipelines:
           environment: uat
           concurrency-group: sfci-uat
           script:
-            - printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias ${uat} --sfdx-url-stdin
+            - sfci auth --target uat
             - sfci release --from uat --output .sfci/release.json
           artifacts:
             - .sfci/release.json
@@ -70,7 +74,7 @@ pipelines:
           deployment: production
           concurrency-group: sfci-production
           script:
-            - printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias ${production} --sfdx-url-stdin
+            - sfci auth --target production
             - sfci deploy --target production --release .sfci/release.json --yes --push
           artifacts:
             - name: sfci-production
@@ -81,12 +85,9 @@ pipelines:
 `;
 }
 
-export function githubWorkflow({
-  trunk,
-  uat,
-  production,
-}: PipelineOptions): string {
-  return `# Set SF_AUTH_URL in GitHub environments named uat and production.
+export function githubWorkflow({ trunk }: PipelineOptions): string {
+  return `# Set SF_CLIENT_ID, SF_USERNAME, SF_INSTANCE_URL and SF_JWT_KEY_B64
+# in GitHub environments named uat and production (JWT only).
 # Configure required reviewers on production if approval is required.
 # Initialize and push baseline receipts before the first run.
 # Use one deployment coordinator per org, with the same concurrency group for
@@ -128,8 +129,8 @@ jobs:
           fetch-depth: 0
       - name: Authenticate UAT
         env:
-          SF_AUTH_URL: ${authSecret}
-        run: printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias ${uat} --sfdx-url-stdin
+${jwtSecrets}
+        run: sfci auth --target uat
       - run: sfci check --target uat
       - uses: actions/upload-artifact@v4
         if: always()
@@ -153,8 +154,8 @@ jobs:
           fetch-depth: 0
       - name: Authenticate UAT
         env:
-          SF_AUTH_URL: ${authSecret}
-        run: printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias ${uat} --sfdx-url-stdin
+${jwtSecrets}
+        run: sfci auth --target uat
       - run: sfci deploy --target uat --yes --push
       - uses: actions/upload-artifact@v4
         if: always()
@@ -180,8 +181,8 @@ jobs:
           fetch-depth: 0
       - name: Authenticate UAT
         env:
-          SF_AUTH_URL: ${authSecret}
-        run: printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias ${uat} --sfdx-url-stdin
+${jwtSecrets}
+        run: sfci auth --target uat
       - run: sfci release --from uat --output .sfci/release.json
       - uses: actions/upload-artifact@v4
         with:
@@ -208,8 +209,8 @@ jobs:
           path: .sfci
       - name: Authenticate production
         env:
-          SF_AUTH_URL: ${authSecret}
-        run: printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias ${production} --sfdx-url-stdin
+${jwtSecrets}
+        run: sfci auth --target production
       - run: sfci deploy --target production --release .sfci/release.json --yes --push
       - uses: actions/upload-artifact@v4
         if: always()
@@ -234,7 +235,6 @@ jobs:
       cancel-in-progress: false
     env:
       TARGET: ${expression("inputs.operation == 'recover-uat' && 'uat' || 'production'")}
-      ORG_ALIAS: ${expression(`inputs.operation == 'recover-uat' && '${uat}' || '${production}'`)}
       RECOVERY_RUN: ${expression("inputs.recovery_run")}
     steps:
       - name: Require an exact interrupted run
@@ -254,8 +254,8 @@ jobs:
           github-token: ${expression("secrets.GITHUB_TOKEN")}
       - name: Authenticate target
         env:
-          SF_AUTH_URL: ${authSecret}
-        run: printf '%s' "$SF_AUTH_URL" | sf org login sfdx-url --alias "$ORG_ALIAS" --sfdx-url-stdin
+${jwtSecrets}
+        run: sfci auth --target "$TARGET"
       - run: sfci resume --target "$TARGET" --yes --push
       - uses: actions/upload-artifact@v4
         if: always()

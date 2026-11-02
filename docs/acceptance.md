@@ -52,7 +52,8 @@ Authenticate, then query `Organization` and confirm `IsSandbox = true` before
 performing any deployment. Do not capture an `org display --verbose` response.
 
 ```sh
-sfci auth --target acceptance --instance-url https://test.salesforce.com
+# Provide this disposable sandbox's JWT variables or an external key file.
+sfci auth --target acceptance
 sf data query --target-org sfci-acceptance \
   --query 'SELECT Id, IsSandbox FROM Organization' --json
 git add .

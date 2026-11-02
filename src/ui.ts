@@ -83,7 +83,11 @@ export function output(
     return;
   }
   const value = asRecord(result);
-  if (command === "init") {
+  if (command === "auth") {
+    process.stdout.write(
+      `Authenticated ${String(value.target)} (${String(value.org)}) using JWT.\n`,
+    );
+  } else if (command === "init") {
     process.stdout.write("sfci is ready.\n");
     for (const file of asArray(value.files))
       process.stdout.write(`  Created ${String(file)}\n`);

@@ -108,20 +108,45 @@ program
 
 program
   .command("auth")
-  .description("Connect an org using the bundled Salesforce browser login")
+  .description("Connect an org with JWT using the bundled Salesforce CLI")
   .requiredOption("--target <environment>", "configured environment")
   .option(
-    "--instance-url <url>",
-    "HTTPS login URL, for example https://test.salesforce.com",
+    "--client-id <id>",
+    "Salesforce application client ID (or SF_CLIENT_ID)",
   )
-  .action(async (options: { target: string; instanceUrl?: string }) => {
-    const ctx = context();
-    const { authenticate } = await import("./commands/auth.js");
-    process.exitCode = await authenticate(
-      { cwd: ctx.cwd, ...options },
-      ctx.output,
-    );
-  });
+  .option(
+    "--username <username>",
+    "Salesforce integration user (or SF_USERNAME)",
+  )
+  .option(
+    "--jwt-key-file <path>",
+    "RSA private key file (or SF_JWT_KEY_FILE / SF_JWT_KEY_B64)",
+  )
+  .option(
+    "--instance-url <url>",
+    "HTTPS login/My Domain URL (or SF_INSTANCE_URL)",
+  )
+  .action(
+    async (options: {
+      target: string;
+      clientId?: string;
+      username?: string;
+      jwtKeyFile?: string;
+      instanceUrl?: string;
+    }) => {
+      const ctx = context();
+      const { authenticate } = await import("./commands/auth.js");
+      output(
+        "auth",
+        await withProgress(
+          "Authenticating with Salesforce JWT",
+          ctx.output,
+          () => authenticate({ cwd: ctx.cwd, ...options }),
+        ),
+        ctx.output,
+      );
+    },
+  );
 
 const planCommand = program
   .command("plan")

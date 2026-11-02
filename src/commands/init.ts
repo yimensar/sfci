@@ -40,7 +40,7 @@ export async function initialize(
   if ((!ci || !uat || !production) && !interactive(output)) {
     throw new CliError(
       "Setup needs a CI provider and two org aliases.",
-      "Run sfci init --ci github --uat <alias> --production <alias>, or use an interactive terminal.",
+      "Run sfci init --ci bitbucket --uat <alias> --production <alias>, or use an interactive terminal.",
     );
   }
   if (interactive(output) && (!ci || !uat || !production)) {
@@ -56,8 +56,8 @@ export async function initialize(
       prompts.select({
         message: "Where will the pipeline run?",
         options: [
-          { value: "github", label: "GitHub Actions" },
           { value: "bitbucket", label: "Bitbucket Pipelines" },
+          { value: "github", label: "GitHub Actions" },
         ],
         output: process.stderr,
       }),
@@ -186,7 +186,7 @@ export async function initialize(
     throw error;
   }
   notes.push(
-    "Set a protected SF_AUTH_URL secret for each CI environment; no credentials were written.",
+    "Set SF_CLIENT_ID, SF_USERNAME, SF_INSTANCE_URL and secured SF_JWT_KEY_B64 for each CI environment. No credentials were written.",
   );
   notes.push(
     "Commit these files, then record the verified baseline of each org.",

@@ -29,6 +29,15 @@ function run(args: string[], cwd = projectRoot) {
     NO_COLOR: "1",
   };
   delete environment.FORCE_COLOR;
+  for (const key of [
+    "SF_CLIENT_ID",
+    "SFDX_CLIENT_ID",
+    "SF_USERNAME",
+    "SF_INSTANCE_URL",
+    "SF_JWT_KEY_FILE",
+    "SF_JWT_KEY_B64",
+  ])
+    delete environment[key];
   return spawnSync(
     process.execPath,
     ["--import", "tsx", cli, "--cwd", cwd, ...args],
@@ -62,7 +71,7 @@ test("help and version work without a Salesforce project or connection", () => {
   assert.equal(help.stderr, "");
   const version = run(["--version"], tmpdir());
   assert.equal(version.status, 0);
-  assert.match(version.stdout, /^0\.1\.0-alpha\.2\n$/);
+  assert.match(version.stdout, /^0\.1\.0-alpha\.3\n$/);
 });
 
 test("usage errors are one structured JSON result without terminal formatting", () => {
@@ -94,7 +103,7 @@ test("init in CI requires explicit answers and creates no configuration", async 
   assert.equal(result.status, 1);
   assert.match(
     (JSON.parse(result.stdout) as { error: { hint: string } }).error.hint,
-    /--ci github/,
+    /--ci bitbucket/,
   );
   await assert.rejects(readFile(join(root, "sfci.yml")), { code: "ENOENT" });
 });
@@ -140,10 +149,10 @@ test("init creates a working configuration and GitHub workflow", async () => {
     join(root, ".github/workflows/sfci.yml"),
     "utf8",
   );
-  assert.match(pipeline, /ghcr\.io\/yimensar\/sfci:0\.1\.0-alpha\.2/);
+  assert.match(pipeline, /ghcr\.io\/yimensar\/sfci:0\.1\.0-alpha\.3/);
   assert.match(pipeline, /head\.repo\.full_name == github\.repository/);
   assert.doesNotMatch(pipeline, /pull_request_target/);
-  assert.match(pipeline, /\$\{\{ secrets\.SF_AUTH_URL \}\}/);
+  assert.match(pipeline, /\$\{\{ secrets\.SF_JWT_KEY_B64 \}\}/);
 });
 
 test("init preserves an existing pipeline and generates a separate example", async () => {
@@ -339,20 +348,25 @@ test("baseline recording requires explicit confirmation in CI", () => {
   assert.match(body.error.hint, /--yes/);
 });
 
-test("web auth rejects JSON and CI without starting an authentication flow", () => {
-  const structured = run(["--json", "auth", "--target", "uat"]);
-  assert.equal(structured.status, 1);
-  assert.equal(
-    (JSON.parse(structured.stdout) as { error: { message: string } }).error
-      .message,
-    "Web authentication does not support --json.",
+test("JWT auth works in noninteractive mode and rejects missing credentials without opening a browser", async () => {
+  const cwd = await project();
+  await writeFile(
+    join(cwd, "sfci.yml"),
+    "trunk: main\nenvironments:\n  uat:\n    org: partial\n",
   );
-  const ci = run(["auth", "--target", "uat"]);
+  const structured = run(["--json", "auth", "--target", "uat"], cwd);
+  assert.equal(structured.status, 1);
+  const body = JSON.parse(structured.stdout);
+  assert.equal(body.error.code, "AUTH_CONFIG");
+  assert.match(body.error.message, /SF_CLIENT_ID/);
+  assert.equal(structured.stderr, "");
+  const ci = run(["auth", "--target", "uat"], cwd);
   assert.equal(ci.status, 1);
-  assert.match(ci.stderr, /needs an interactive terminal/);
+  assert.match(ci.stderr, /SF_CLIENT_ID/);
+  assert.doesNotMatch(ci.stderr, /interactive|browser/);
 });
 
-test("web auth only accepts an HTTPS origin without embedded credentials", () => {
+test("JWT auth only accepts an HTTPS origin without embedded credentials", () => {
   assert.doesNotThrow(() => validateInstanceUrl("https://test.salesforce.com"));
   assert.doesNotThrow(() =>
     validateInstanceUrl("https://my-org.my.salesforce.com/"),

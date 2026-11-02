@@ -1,59 +1,129 @@
-import { spawn } from "node:child_process";
+import { constants } from "node:fs";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createPrivateKey } from "node:crypto";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import { readConfig } from "../core/config.js";
-import {
-  privateSalesforceCli,
-  salesforceEnvironment,
-} from "../core/process.js";
-import { CliError, interactive, type OutputOptions } from "../ui.js";
+import { runtime } from "../core/salesforce.js";
+import { SfciError, type TargetOptions } from "../core/types.js";
+import { CliError } from "../ui.js";
+
+export interface AuthOptions extends TargetOptions {
+  clientId?: string;
+  username?: string;
+  jwtKeyFile?: string;
+  instanceUrl?: string;
+}
 
 export async function authenticate(
-  options: { cwd: string; target: string; instanceUrl?: string },
-  output: OutputOptions,
-): Promise<number> {
-  if (output.json)
-    throw new CliError(
-      "Web authentication does not support --json.",
-      "Run sfci auth --target <environment> in an interactive terminal.",
-    );
-  if (!interactive(output))
-    throw new CliError(
-      "Web authentication needs an interactive terminal.",
-      "For CI, use the bundled sf command with your protected authentication variables.",
-    );
+  options: AuthOptions,
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<{ target: string; org: string; method: "jwt" }> {
   const config = await readConfig(options.cwd);
-  const environment = config.environments[options.target];
-  if (!environment)
+  const target = config.environments[options.target];
+  if (!target)
     throw new CliError(
       `Unknown environment ${options.target}.`,
       "Choose an environment from sfci.yml.",
     );
-  if (options.instanceUrl) validateInstanceUrl(options.instanceUrl);
-  const args = [
-    privateSalesforceCli(),
-    "org",
-    "login",
-    "web",
-    `--alias=${environment.org}`,
-    ...(options.instanceUrl ? [`--instance-url=${options.instanceUrl}`] : []),
-  ];
-  return new Promise((accept, reject) => {
-    const child = spawn(process.execPath, args, {
-      cwd: options.cwd,
-      stdio: "inherit",
-      env: salesforceEnvironment(),
-    });
-    child.on("error", () =>
-      reject(
-        new CliError(
-          "Cannot start the bundled Salesforce CLI.",
-          "Reinstall sfci and run sfci doctor.",
+  const clientId = required(
+    options.clientId ?? environment.SF_CLIENT_ID ?? environment.SFDX_CLIENT_ID,
+    "SF_CLIENT_ID",
+  );
+  const username = required(
+    options.username ?? environment.SF_USERNAME,
+    "SF_USERNAME",
+  );
+  const instanceUrl = required(
+    options.instanceUrl ?? environment.SF_INSTANCE_URL,
+    "SF_INSTANCE_URL",
+  );
+  validateInstanceUrl(instanceUrl);
+  const providedFile = options.jwtKeyFile ?? environment.SF_JWT_KEY_FILE;
+  const key = providedFile
+    ? null
+    : decodePrivateKey(
+        required(
+          environment.SF_JWT_KEY_B64,
+          "SF_JWT_KEY_B64 or --jwt-key-file",
         ),
-      ),
+      );
+  const directory = key ? await mkdtemp(resolve(tmpdir(), "sfci-jwt-")) : null;
+  try {
+    const path = providedFile
+      ? resolve(options.cwd, providedFile)
+      : resolve(directory!, "server.key");
+    if (key) await writeFile(path, key, { mode: 0o600, flag: "wx" });
+    else {
+      try {
+        await access(path, constants.R_OK);
+      } catch {
+        throw new CliError(
+          "Cannot read the JWT private key file.",
+          "Provide a readable --jwt-key-file or SF_JWT_KEY_FILE.",
+          "AUTH_CONFIG",
+        );
+      }
+    }
+    try {
+      await runtime(options).sf(
+        [
+          "org",
+          "login",
+          "jwt",
+          `--client-id=${clientId}`,
+          `--username=${username}`,
+          `--instance-url=${instanceUrl}`,
+          `--jwt-key-file=${path}`,
+          `--alias=${target.org}`,
+        ],
+        options.cwd,
+      );
+    } catch (error) {
+      if (error instanceof SfciError)
+        throw new CliError(
+          error.message,
+          "Verify the JWT client ID, username, instance URL, certificate and the user's application authorization.",
+          "AUTH_FAILED",
+        );
+      throw error;
+    }
+    // Salesforce's response includes an access token. Never return or print it.
+    return { target: options.target, org: target.org, method: "jwt" };
+  } finally {
+    if (directory) await rm(directory, { recursive: true, force: true });
+  }
+}
+
+function required(value: string | undefined, name: string): string {
+  if (!value?.trim())
+    throw new CliError(
+      `JWT authentication requires ${name}.`,
+      "Set the JWT variables for this CI environment, or supply the corresponding command options.",
+      "AUTH_CONFIG",
     );
-    child.on("close", (code, signal) =>
-      accept(signal === "SIGINT" ? 130 : (code ?? 1)),
+  return value.trim();
+}
+
+function decodePrivateKey(value: string): Buffer {
+  const encoded = value.replace(/\s/g, "");
+  try {
+    if (
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+        encoded,
+      )
+    )
+      throw new Error();
+    const key = Buffer.from(encoded, "base64");
+    if (createPrivateKey(key).asymmetricKeyType !== "rsa") throw new Error();
+    return key;
+  } catch {
+    throw new CliError(
+      "SF_JWT_KEY_B64 must contain a base64-encoded RSA private key.",
+      "Encode the PEM key as base64. Store it as a secured CI variable; never commit it.",
+      "AUTH_CONFIG",
     );
-  });
+  }
 }
 
 export function validateInstanceUrl(value: string): void {

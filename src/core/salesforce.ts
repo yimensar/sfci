@@ -34,7 +34,7 @@ export async function identify(
   ) {
     throw new SfciError(
       `Cannot identify Salesforce org ${org}.`,
-      "Authenticate with sf org login web --alias <alias>, then verify access to the Organization object.",
+      "Run sfci auth --target <environment> with its JWT credentials, then verify access to the Organization object.",
       "ORG",
     );
   }
